@@ -1,8 +1,8 @@
-"""Find initiative IDs that are missing or have incomplete data in eu_initiative_details.jsonl.
+"""Find initiative IDs that are missing or have incomplete data in initiative_details/.
 
 Reports:
-  - IDs in CSV but not in JSONL at all
-  - IDs in JSONL with publications that have feedback_error (feedback API returned 400)
+  - IDs in CSV but not in initiative_details/ directory
+  - IDs in initiative_details/ with publications that have feedback_error (feedback API returned 400)
 """
 
 import csv
@@ -13,32 +13,32 @@ from pathlib import Path
 def main():
     base = Path(__file__).parent.parent
     csv_path = base / "eu_initiatives.csv"
-    jsonl_path = base / "eu_initiative_details.jsonl"
+    details_dir = base / "initiative_details"
 
     with open(csv_path, encoding="utf-8") as f:
         csv_ids = {int(row["id"]) for row in csv.DictReader(f)}
 
-    jsonl_ids = set()
+    detail_ids = set()
     fb_error_initiatives = {}  # id -> (title, list of (pub_id, pub_type, error))
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            obj = json.loads(line)
-            jsonl_ids.add(obj["id"])
-            for pub in obj.get("publications", []):
-                if "feedback_error" in pub:
-                    entry = fb_error_initiatives.setdefault(
-                        obj["id"], (obj.get("short_title", ""), [])
-                    )
-                    entry[1].append(
-                        (pub["publication_id"], pub["type"], pub["feedback_error"])
-                    )
+    for json_file in details_dir.glob("*.json"):
+        with open(json_file, encoding="utf-8") as f:
+            obj = json.load(f)
+        detail_ids.add(obj["id"])
+        for pub in obj.get("publications", []):
+            if "feedback_error" in pub:
+                entry = fb_error_initiatives.setdefault(
+                    obj["id"], (obj.get("short_title", ""), [])
+                )
+                entry[1].append(
+                    (pub["publication_id"], pub["type"], pub["feedback_error"])
+                )
 
-    missing = sorted(csv_ids - jsonl_ids)
+    missing = sorted(csv_ids - detail_ids)
 
     print(f"CSV unique IDs: {len(csv_ids)}")
-    print(f"JSONL unique IDs: {len(jsonl_ids)}")
+    print(f"initiative_details/ unique IDs: {len(detail_ids)}")
 
-    print(f"\nMissing from JSONL entirely: {len(missing)}")
+    print(f"\nMissing from initiative_details/ entirely: {len(missing)}")
     for mid in missing:
         print(f"  {mid}")
 

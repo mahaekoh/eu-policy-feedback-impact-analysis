@@ -12,12 +12,6 @@ import sys
 from pathlib import Path
 
 
-def scan_jsonl(jsonl_path):
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            yield json.loads(line)
-
-
 def scan_dir(dir_path):
     for fname in sorted(os.listdir(dir_path)):
         if fname.endswith(".json"):
@@ -34,9 +28,8 @@ def main():
         description="Find attachments that have no extracted text."
     )
     parser.add_argument(
-        "source", nargs="?",
-        default=str(Path(__file__).parent.parent / "eu_initiative_details.jsonl"),
-        help="Path to JSONL file or initiative_details/ directory",
+        "source",
+        help="Path to initiative_details/ directory",
     )
     parser.add_argument(
         "-f", "--filter",
@@ -50,11 +43,7 @@ def main():
             whitelist = {int(line.strip()) for line in f if line.strip()}
         print(f"Filtering to {len(whitelist)} whitelisted initiatives")
 
-    source = Path(args.source)
-    if source.is_dir():
-        initiatives = scan_dir(source)
-    else:
-        initiatives = scan_jsonl(source)
+    initiatives = scan_dir(args.source)
 
     missing_docs = 0
     missing_fb_att = 0
