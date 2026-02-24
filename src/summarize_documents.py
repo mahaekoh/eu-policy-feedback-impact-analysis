@@ -50,25 +50,24 @@ IDENTITY_PROMPT = (
 
 DOCUMENT_PROMPT_PREFIX = (
     "The following is a section of a publication document from an EU policy initiative. "
-    "Summarize it into exactly 5 paragraphs of exactly 5 sentences each. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
+    "Summarize it into a text up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
 )
 
 FEEDBACK_ATTACHMENT_PROMPT_PREFIX = (
     "The following is a section of a feedback attachment submitted in response to an EU policy initiative. "
-    "Summarize it into at most 5 paragraphs of at most 5 sentences each. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
+    "Summarize it into a text up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
 )
 
 DOCUMENT_COMBINE_PREFIX = (
     "The following are summaries of consecutive sections of a publication document "
-    "from an EU policy initiative. Combine them into a single summary of exactly "
-    "5 paragraphs of exactly 5 sentences each. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
+    "from an EU policy initiative. Combine them into a single summary up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
 )
 
 FEEDBACK_COMBINE_PREFIX = (
     "The following are summaries of consecutive sections of a feedback attachment "
-    "submitted in response to an EU policy initiative. Combine them into a single "
-    "summary of at most 5 paragraphs of at most 5 sentences each. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
+    "submitted in response to an EU policy initiative. Combine them into a single summary up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors.\n\n"
 )
+
 
 
 def build_prefill(

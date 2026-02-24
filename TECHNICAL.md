@@ -272,12 +272,12 @@ python3 src/summarize_documents.py before_after_analysis_v2/ \
 - **Prompt structure**:
   - System identity: "You are a policy analyst who summarizes EU regulatory documents clearly and concisely"
   - Pass 1 (chunk summarization):
-    - Publication documents: "The following is a section of a publication document from an EU policy initiative. Summarize it into exactly 5 paragraphs of exactly 5 sentences each."
-    - Feedback attachments: "The following is a section of a feedback attachment submitted in response to an EU policy initiative. Summarize it into at most 5 paragraphs of at most 5 sentences each."
+    - Publication documents: "Summarize it into a text up to 10 paragraphs."
+    - Feedback attachments: "Summarize it into a text up to 10 paragraphs."
   - Combine (recursive merging):
-    - Publication documents: "The following are summaries of consecutive sections of a publication document from an EU policy initiative. Combine them into a single summary of exactly 5 paragraphs of exactly 5 sentences each."
-    - Feedback attachments: "The following are summaries of consecutive sections of a feedback attachment submitted in response to an EU policy initiative. Combine them into a single summary of at most 5 paragraphs of at most 5 sentences each."
-  - All prompts include: "If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors"
+    - Publication documents: "Combine them into a single summary up to 20 paragraphs."
+    - Feedback attachments: "Combine them into a single summary up to 20 paragraphs."
+  - All prompts include: "Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors"
 - **Chunking**: sentence-boundary splits at 5,000 chars (configurable via `--chunk-size`)
 - **Initiative batching**: processes files in groups (default 10) to manage memory
 - **Deduplication + resume**: same as translation pipeline (cross-batch cache, batch file resume)
