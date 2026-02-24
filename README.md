@@ -115,7 +115,6 @@ The output files are standard JSON. You can explore them with:
 ## Configuration Files
 
 - **`initiative-whitelist-145.txt`** — list of 145 initiative IDs selected for detailed analysis (one ID per line)
-- **`init-no-response-blacklist-19.txt`** — 19 initiative IDs where the Commission published no documents after receiving feedback
 
 ## Technical Details
 
