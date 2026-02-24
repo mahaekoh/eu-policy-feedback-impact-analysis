@@ -19,6 +19,15 @@ This document covers the architecture, dependencies, data schemas, and usage of 
           |  PDF (pymupdf4llm + tesseract fallback)
           |  DOCX (docx2md), DOC (textutil)
           |  RTF/ODT (pypandoc), TXT (direct)
+          |  For .doc/.docx/.odt/.rtf: tries PDF first (many are mislabeled)
+          |
+          |
+                          REPAIR
+                          ------
+          |
+          v
+  repair_broken_attachments.py -----> repaired_details/*.json + repair_report.json
+          |                            (retries extraction for broken attachments)
           |
           |
                        DATA ENRICHMENT
@@ -51,11 +60,14 @@ This document covers the architecture, dependencies, data schemas, and usage of 
                          --------
           |
           v
-  initiative_stats.py -o -----------> before_after_analysis_v2/*.json
-          |                            (128 initiative files with before/after structure)
+  initiative_stats.py -o -----------> before_after_analysis_v3/*.json
+          |                            (118 initiative files with before/after structure)
           v
-  summarize_documents.py -----------> summaries_output/*.json
-                                       (summary fields added to documents & attachments)
+  summarize_documents.py -----------> summaries_output_v8/*.json
+          |                            (summary fields added to documents & attachments)
+          v
+  build_unit_summaries.py ----------> unit_summaries/*.json
+                                       (unified per-initiative summary fields)
 ```
 
 ## Prerequisites
@@ -114,16 +126,40 @@ python3 src/scrape_eu_initiative_details.py 12970
   - `GET /api/download/{id}` — feedback attachment download
 - **Thread pools**: 20 initiative workers, 20 feedback workers, 40 PDF extraction workers
 - **Text extraction chain**:
-  1. `.pdf` → `pymupdf4llm.to_markdown()` → fallback to `pymupdf` plain text → if < 100 chars and file > 2 KB, OCR via tesseract at 300 DPI
-  2. `.docx` → `docx2md`
-  3. `.doc` → macOS `textutil -convert txt`
-  4. `.rtf`, `.odt` → `pypandoc.convert_file()` to markdown
-  5. `.txt` → direct read (UTF-8 with error replacement)
-  6. `.zip` → skipped
+  1. `.doc`, `.docx`, `.odt`, `.rtf` → tries PDF extraction first (many uploads are mislabeled PDFs); if the result is < 100 chars, falls back to the native pipeline below
+  2. `.pdf` → `pymupdf4llm.to_markdown()` → fallback to `pymupdf` plain text → if < 100 chars and file > 2 KB, OCR via tesseract at 300 DPI
+  3. `.docx` → `docx2md`
+  4. `.doc` → macOS `textutil -convert txt`
+  5. `.rtf`, `.odt` → `pypandoc.convert_file()` to markdown
+  6. `.txt` → direct read (UTF-8 with error replacement)
+  7. `.zip` → skipped
 - **Resume**: skips initiative IDs that already have a JSON file in the output directory
 - **Output**: one JSON file per initiative in `initiative_details/`
 
-### Stage 2: Data Enrichment (OCR)
+### Stage 2: Repair
+
+#### `repair_broken_attachments.py`
+
+Scans initiative detail files for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction.
+
+```bash
+# Scan and report (dry run)
+python3 src/repair_broken_attachments.py -o repaired_details/ --dry-run
+
+# Repair with whitelist filter
+python3 src/repair_broken_attachments.py -o repaired_details/ -f initiative-whitelist-145.txt
+
+# Repair with custom worker count
+python3 src/repair_broken_attachments.py -o repaired_details/ -w 20
+```
+
+- **Strategy**: for `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the native format-specific pipeline
+- **Output**: copies of initiative JSONs (only files with at least one repair) to the output directory, plus `repair_report.json`
+- **Repair report**: machine-readable list of repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, usable as `-r` input to downstream scripts
+- **Traceability**: adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments
+- **Downstream scoping**: `find_short_pdf_extractions.py -r` and `find_non_english_feedback_attachments.py -r` accept the repair report to scope processing to just the repaired attachments
+
+### Stage 3: Data Enrichment (OCR)
 
 #### `find_short_pdf_extractions.py`
 
@@ -169,7 +205,7 @@ python3 src/merge_ocr_results.py short_pdf_report_ocr.json initiative_details/
 - **Behavior**: replaces `extracted_text` with OCR result, saves original as `extracted_text_without_ocr`
 - **Lookup**: matches by initiative ID, publication ID, download URL (for documents) or feedback/attachment ID (for feedback attachments)
 
-### Stage 3: Translation
+### Stage 4: Translation
 
 #### `find_non_english_feedback_attachments.py`
 
@@ -228,7 +264,7 @@ python3 src/merge_translations.py translated_batches/ initiative_details/ --dry-
 - **Input modes**: accepts either the combined JSON file or the batch directory directly
 - **Publication ID resolution**: for older batch formats missing `publication_id`, looks it up from `--input-records` or by searching the initiative files
 
-### Stage 4: Analysis
+### Stage 5: Analysis
 
 #### `initiative_stats.py`
 
@@ -240,7 +276,7 @@ python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/
 
 # Write enriched JSONs
 python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/ \
-    -o before_after_analysis_v2/
+    -o before_after_analysis_v3/
 ```
 
 - **Input**: whitelist of initiative IDs + initiative detail directory
@@ -259,8 +295,8 @@ python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/
 Summarizes publication documents and feedback attachments using LLM batch inference.
 
 ```bash
-python3 src/summarize_documents.py before_after_analysis_v2/ \
-    -o summaries_output/ \
+python3 src/summarize_documents.py before_after_analysis_v3/ \
+    -o summaries_output_v8/ \
     --batch-size 16 \
     --initiative-batch-size 10
 ```
@@ -283,6 +319,33 @@ python3 src/summarize_documents.py before_after_analysis_v2/ \
 - **Initiative batching**: processes files in groups (default 10) to manage memory
 - **Deduplication + resume**: same as translation pipeline (cross-batch cache, batch file resume)
 - **Output**: initiative JSONs with `summary` field added to each document and attachment
+
+#### `build_unit_summaries.py`
+
+Consolidates individual document and attachment summaries into per-initiative unified summary fields for downstream analysis.
+
+```bash
+python3 src/build_unit_summaries.py summaries_output_v8/ -o unit_summaries/
+```
+
+- **Input**: output directory from `summarize_documents.py`
+- **Output fields added to initiative JSON**:
+  - `before_feedback_summary` — concatenation (joined by `\n\n`) of all `summary` fields from `documents_before_feedback`
+  - `after_feedback_summary` — concatenation of all `summary` fields from `documents_after_feedback`
+  - `combined_feedback_summary` — on each `middle_feedback` item: the `feedback_text` plus all attachment `summary` fields, concatenated
+- **Stats**: reports the longest policy-level and feedback-level summaries across all initiatives
+
+### Viewer
+
+#### `viewer.html`
+
+Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser.
+
+- **File loading**: browser file picker to load any initiative JSON
+- **Tabbed navigation**: Before Feedback, After Feedback, Feedback, Publications
+- **Document features**: download links, feedback portal links, attachment download links
+- **Text display**: expandable blocks for summaries, extracted text, pre-translation originals, pre-OCR originals
+- **Feedback features**: user type color coding, filtering by type/search/empty attachments, chunked infinite scroll for large feedback lists
 
 ### Utilities
 
@@ -396,6 +459,9 @@ python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" initiat
               "extracted_text": "Full text (translated if needed)...",
               "extracted_text_before_translation": "Original non-English text...",
               "extracted_text_without_ocr": "Original pre-OCR text...",
+              "extracted_text_error": "Error message if extraction failed...",
+              "repair_method": "pdf-reinterpret or native (if repaired)",
+              "repair_old_error": "Original error before repair...",
               "summary": "..."
             }
           ]
@@ -406,7 +472,7 @@ python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" initiat
 }
 ```
 
-### Before/after analysis JSON (`before_after_analysis_v2/{id}.json`)
+### Before/after analysis JSON (`before_after_analysis_v3/{id}.json`)
 
 Same structure as the initiative JSON, with three additional top-level fields:
 
@@ -415,6 +481,16 @@ Same structure as the initiative JSON, with three additional top-level fields:
 | `documents_before_feedback` | `list[document]` | Documents from publications up to and including the first one with feedback |
 | `documents_after_feedback` | `list[document]` | Documents from the final publication |
 | `middle_feedback` | `list[feedback]` | All feedback between the first feedback publication and the final document publication |
+
+### Unit summaries JSON (output of `build_unit_summaries.py`)
+
+Same structure as the summaries output, with additional top-level and per-feedback fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `before_feedback_summary` | `string` | Concatenation of all document summaries from before feedback |
+| `after_feedback_summary` | `string` | Concatenation of all document summaries from after feedback |
+| `middle_feedback[].combined_feedback_summary` | `string` | Feedback text + all attachment summaries, concatenated |
 
 ## Configuration Files
 
@@ -432,41 +508,72 @@ python3 src/scrape_eu_initiatives.py
 # 2. Scrape all initiative details (resumable, ~6.8 GB output)
 python3 src/scrape_eu_initiative_details.py -o initiative_details/
 
-# 3. Find and download PDFs with failed text extraction
+# 3. Repair broken attachments (retry failed text extractions)
+python3 src/repair_broken_attachments.py -o repaired_details/ \
+    -f initiative-whitelist-145.txt
+
+# 4. Find and download PDFs with failed text extraction
 python3 src/find_short_pdf_extractions.py initiative_details/ \
     -f initiative-whitelist-145.txt \
     -p short_pdfs/ \
     -o short_pdf_report.json
 
-# 4. Run GPU OCR on those PDFs
+# 5. Run GPU OCR on those PDFs
 python3 src/ocr_short_pdfs.py short_pdf_report.json short_pdfs/ \
     -o short_pdf_report_ocr.json
 
-# 5. Merge OCR results back
+# 6. Merge OCR results back
 python3 src/merge_ocr_results.py short_pdf_report_ocr.json initiative_details/
 
-# 6. Find non-English feedback attachments
+# 7. Find non-English feedback attachments
 python3 src/find_non_english_feedback_attachments.py initiative_details/ \
     -f initiative-whitelist-145.txt \
     -o non_english_attachments.json
 
-# 7. Translate non-English attachments (GPU required)
+# 8. Translate non-English attachments (GPU required)
 python3 src/translate_attachments.py non_english_attachments.json \
     -o non_english_attachments_translated.json
 
-# 8. Merge translations back
+# 9. Merge translations back
 python3 src/merge_translations.py non_english_attachments_translated.json initiative_details/
 
-# 9. Build before/after analysis structure
+# 10. Build before/after analysis structure
 python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/ \
-    -o before_after_analysis_v2/
+    -o before_after_analysis_v3/
 
-# 10. Summarize documents and feedback (GPU required)
-python3 src/summarize_documents.py before_after_analysis_v2/ \
-    -o summaries_output/
+# 11. Summarize documents and feedback (GPU required)
+python3 src/summarize_documents.py before_after_analysis_v3/ \
+    -o summaries_output_v8/
+
+# 12. Build unified per-initiative summaries
+python3 src/build_unit_summaries.py summaries_output_v8/ -o unit_summaries/
 ```
 
-Steps 1-3 and 5-6 run on CPU. Steps 4, 7, and 10 require a GPU.
+Steps 1-4 and 6-7 run on CPU. Steps 5, 8, and 11 require a GPU.
+
+### Repair pipeline (re-extract broken attachments, then re-run OCR + translation)
+
+After running the repair step (step 3), the repaired files can be run through the OCR and translation stages scoped to just the repaired attachments:
+
+```bash
+# OCR for repaired attachments
+python3 src/find_short_pdf_extractions.py repaired_details/ \
+    -r repaired_details/repair_report.json \
+    -p short_pdfs/ -o short_pdf_report_repair.json
+python3 src/ocr_short_pdfs.py short_pdf_report_repair.json short_pdfs/ \
+    -o short_pdf_report_ocr.json
+python3 src/merge_ocr_results.py short_pdf_report_ocr.json repaired_details/
+
+# Translation for repaired attachments
+python3 src/find_non_english_feedback_attachments.py repaired_details/ \
+    -r repaired_details/repair_report.json \
+    -o non_english_attachments_repair.json
+python3 src/translate_attachments.py non_english_attachments_repair.json \
+    -o non_english_attachments_translated_repair.json
+python3 src/merge_translations.py non_english_attachments_translated_repair.json repaired_details/
+```
+
+**Important:** When using `-r repair_report.json`, point the source at the *repaired* output directory (not the original `initiative_details/`), since the repaired JSONs contain the newly extracted text.
 
 ## Key Design Decisions
 
@@ -489,6 +596,10 @@ OCR results and translations are generated as separate files, then merged back i
 ### Deduplication and resume
 
 Translation and summarization pipelines write per-batch result files. On restart, completed batches are loaded from disk. Identical text chunks across different records are cached and only processed once (cross-batch dedup).
+
+### PDF-first extraction strategy
+
+Many file uploads on the EU portal have incorrect extensions (e.g. a `.doc` file that is actually a PDF). Both the scraper and repair script handle this by trying PDF extraction first for `.doc/.docx/.odt/.rtf` files. If the PDF extraction produces fewer than 100 characters, it falls back to the native format-specific pipeline. This recovers text from a significant number of attachments that would otherwise fail extraction.
 
 ### Publication type mapping
 

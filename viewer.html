@@ -210,6 +210,25 @@ body {
   overflow-y: auto;
 }
 .text-content.open { display: block; }
+.text-content.markdown { white-space: normal; }
+.text-content.markdown h1, .text-content.markdown h2, .text-content.markdown h3,
+.text-content.markdown h4, .text-content.markdown h5, .text-content.markdown h6 {
+  margin: 12px 0 6px; line-height: 1.3;
+}
+.text-content.markdown h1 { font-size: 18px; }
+.text-content.markdown h2 { font-size: 16px; }
+.text-content.markdown h3 { font-size: 15px; }
+.text-content.markdown p { margin: 8px 0; }
+.text-content.markdown ul, .text-content.markdown ol { margin: 8px 0; padding-left: 24px; }
+.text-content.markdown li { margin: 4px 0; }
+.text-content.markdown blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid #ccc; color: #555; }
+.text-content.markdown code { background: #e8e8e8; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.text-content.markdown pre { background: #e8e8e8; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+.text-content.markdown pre code { background: none; padding: 0; }
+.text-content.markdown table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.text-content.markdown th, .text-content.markdown td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+.text-content.markdown th { background: #e8e8e8; font-weight: 600; }
+.text-content.markdown hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
 .text-truncated {
   font-size: 13px;
   color: #636e72;
@@ -456,9 +475,20 @@ body {
   <div class="tab-pane" id="pane-publications"></div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/2.1.0/showdown.min.js"></script>
 <script>
 (function() {
   'use strict';
+
+  // --- Markdown converter ---
+  const mdConverter = new showdown.Converter({
+    tables: true,
+    strikethrough: true,
+    tasklists: true,
+    simpleLineBreaks: false,
+    openLinksInNewWindow: true,
+    headerLevelStart: 3,
+  });
 
   // --- State ---
   let data = null;
@@ -636,10 +666,10 @@ body {
     }
 
     if (doc.summary) {
-      html += renderTextBlock('Summary', doc.summary, 'sum-' + uid, true);
+      html += renderTextBlock('Summary', doc.summary, 'sum-' + uid, true, true);
     }
     if (doc.extracted_text) {
-      html += renderTextBlock('Extracted Text', doc.extracted_text, 'ext-' + uid, false);
+      html += renderTextBlock('Extracted Text', doc.extracted_text, 'ext-' + uid, false, true);
     }
 
     html += '</div>';
@@ -647,17 +677,23 @@ body {
   }
 
   // textId is used to store/retrieve full text from data, startOpen controls default state
-  function renderTextBlock(label, text, textId, startOpen) {
-    // Store full text in a data attribute-free way
-    textStore[textId] = text;
-    const preview = truncate(text, 500);
+  // isMarkdown: if true, render as markdown via showdown (used for summaries)
+  function renderTextBlock(label, text, textId, startOpen, isMarkdown) {
+    // Store full text and markdown flag
+    textStore[textId] = { text: text, isMarkdown: !!isMarkdown };
     const isLong = text.length > 500;
+    const mdClass = isMarkdown ? ' markdown' : '';
+
+    let content = '';
+    if (startOpen) {
+      content = isMarkdown ? mdConverter.makeHtml(text) : esc(text);
+    }
 
     return `<div class="text-block">
       <div class="text-block-header${startOpen ? ' expanded' : ''}" onclick="toggleText('${textId}')">
         ${esc(label)}${isLong ? ' (' + text.length.toLocaleString() + ' chars)' : ''}
       </div>
-      <div class="text-content${startOpen ? ' open' : ''}" id="tc-${textId}">${startOpen ? esc(text) : ''}</div>
+      <div class="text-content${mdClass}${startOpen ? ' open' : ''}" id="tc-${textId}">${content}</div>
     </div>`;
   }
 
@@ -667,18 +703,24 @@ body {
     const header = document.querySelector(`[onclick="toggleText('${textId}')"]`);
     const content = document.getElementById('tc-' + textId);
     if (!header || !content) return;
+    const entry = textStore[textId];
+    if (!entry) return;
     const isOpen = content.classList.contains('open');
     if (isOpen) {
       content.classList.remove('open');
       header.classList.remove('expanded');
       // Clear large text from DOM to save memory
-      if (textStore[textId] && textStore[textId].length > 2000) {
-        content.textContent = '';
+      if (entry.text && entry.text.length > 2000) {
+        content.innerHTML = '';
       }
     } else {
       // Lazy-load text into DOM
-      if (!content.textContent || content.textContent.length < 10) {
-        content.textContent = textStore[textId] || '';
+      if (!content.innerHTML || content.innerHTML.length < 10) {
+        if (entry.isMarkdown) {
+          content.innerHTML = mdConverter.makeHtml(entry.text);
+        } else {
+          content.textContent = entry.text;
+        }
       }
       content.classList.add('open');
       header.classList.add('expanded');
@@ -939,10 +981,10 @@ body {
 
     const prefix = 'att-' + fbIdx + '-' + attIdx;
     if (att.summary) {
-      html += renderTextBlock('Summary', att.summary, prefix + '-sum', true);
+      html += renderTextBlock('Summary', att.summary, prefix + '-sum', true, true);
     }
     if (att.extracted_text) {
-      html += renderTextBlock('Extracted Text', att.extracted_text, prefix + '-ext', false);
+      html += renderTextBlock('Extracted Text', att.extracted_text, prefix + '-ext', false, true);
     }
     if (att.extracted_text_before_translation) {
       html += renderTextBlock('Original (before translation)', att.extracted_text_before_translation, prefix + '-pretrans', false);

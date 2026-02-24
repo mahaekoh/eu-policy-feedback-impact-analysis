@@ -470,9 +470,38 @@ def main():
         print("Nothing to do.")
         return
 
-    # Initialize vLLM
+    # Build groups and check which need processing
+    os.makedirs(args.output, exist_ok=True)
+    all_groups = []
+    pending_groups = []
+    skipped_files = 0
+    for group_start in range(0, len(initiative_files), args.initiative_batch_size):
+        group_files = initiative_files[group_start:group_start + args.initiative_batch_size]
+        all_groups.append(group_files)
+
+    n_groups = len(all_groups)
+    for group_idx, group_files in enumerate(all_groups):
+        all_exist = all(
+            os.path.isfile(os.path.join(args.output, f))
+            for f in group_files
+        )
+        if all_exist:
+            skipped_files += len(group_files)
+            print(f"Group {group_idx+1}/{n_groups}: "
+                  f"all {len(group_files)} output files exist, skipping")
+        else:
+            pending_groups.append((group_idx, group_files))
+    if skipped_files:
+        print(f"\nResume: {skipped_files}/{len(initiative_files)} files already exist, "
+              f"{len(pending_groups)}/{n_groups} groups need processing")
+
+    if not pending_groups:
+        print("\nAll output files already exist. Nothing to do.")
+        return
+
+    # Initialize vLLM (deferred until we know there is work)
     tp_size = torch.cuda.device_count()
-    print(f"CUDA device count: {tp_size}")
+    print(f"\nCUDA device count: {tp_size}")
     print(f"Loading model {args.model} (tp={tp_size})...")
     t0 = time.time()
     llm_kwargs = {
@@ -492,17 +521,8 @@ def main():
         stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
     )
 
-    # Prepare output and batch directories
-    os.makedirs(args.output, exist_ok=True)
-    batch_dir_p1 = os.path.join(args.output, "_batches_pass1")
-    batch_dir_p2 = os.path.join(args.output, "_batches_pass2")
-    os.makedirs(batch_dir_p1, exist_ok=True)
-    os.makedirs(batch_dir_p2, exist_ok=True)
-
     # Shared state across initiative groups
     summary_cache = {}   # text -> summary (persists for dedup across groups)
-    batch_num_p1 = 0
-    batch_num_p2 = 0
     grand_items = 0
     grand_prompts = 0
     grand_summaries = 0
@@ -510,14 +530,20 @@ def main():
     all_failed = []
 
     t_total_start = time.time()
-    n_groups = (len(initiative_files) + args.initiative_batch_size - 1) // args.initiative_batch_size
 
-    for group_idx, group_start in enumerate(range(0, len(initiative_files), args.initiative_batch_size)):
-        group_files = initiative_files[group_start:group_start + args.initiative_batch_size]
+    for pending_idx, (group_idx, group_files) in enumerate(pending_groups):
+        group_start = group_idx * args.initiative_batch_size
         group_end = group_start + len(group_files)
 
+        # Per-group batch directories (local batch numbering, groups are independent)
+        batch_dir_p1 = os.path.join(args.output, "_batches_pass1", f"group_{group_idx:04d}")
+        batch_dir_p2 = os.path.join(args.output, "_batches_pass2", f"group_{group_idx:04d}")
+        os.makedirs(batch_dir_p1, exist_ok=True)
+        os.makedirs(batch_dir_p2, exist_ok=True)
+
         print(f"\n{'='*60}")
-        print(f"Group {group_idx+1}/{n_groups}: initiatives {group_start+1}-{group_end}/{len(initiative_files)} "
+        print(f"Group {group_idx+1}/{n_groups} (pending {pending_idx+1}/{len(pending_groups)}): "
+              f"initiatives {group_start+1}-{group_end}/{len(initiative_files)} "
               f"({len(group_files)} files)")
         print(f"{'='*60}\n")
 
@@ -555,9 +581,8 @@ def main():
             llm, sampling_params, encoding,
             prompts, chunk_texts, prompt_map,
             args.batch_size, batch_dir_p1, summary_cache,
-            batch_num_start=batch_num_p1, label="[P1] ",
+            batch_num_start=0, label="[P1] ",
         )
-        batch_num_p1 = stats_p1["batch_num"]
         all_failed.extend(failed_p1)
 
         # === Assemble final summaries ===
@@ -589,6 +614,7 @@ def main():
         # === Pass 2: Recursively combine chunk summaries ===
         max_combine = args.max_combine_chunks
         combine_level = 0
+        batch_num_p2 = 0
 
         while current_parts:
             combine_level += 1
@@ -599,8 +625,8 @@ def main():
             p2_prompt_map = []
 
             for item_idx, parts in current_parts.items():
-                groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
-                for gi, group in enumerate(groups):
+                chunk_groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                for gi, group in enumerate(chunk_groups):
                     if len(group) == 1:
                         # Single-element group: pass through without inference
                         continue
@@ -629,9 +655,9 @@ def main():
             # Collect results into next level
             next_parts = {}
             for item_idx, parts in current_parts.items():
-                groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                chunk_groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
                 new_parts = []
-                for gi, group in enumerate(groups):
+                for gi, group in enumerate(chunk_groups):
                     if len(group) == 1:
                         new_parts.append(group[0])  # pass-through
                     elif item_idx in p2_results and gi in p2_results[item_idx]:
@@ -658,9 +684,9 @@ def main():
     print(f"\n{'='*60}")
     print(f"ALL DONE in {total_elapsed:.1f}s")
     print(f"{'='*60}")
-    print(f"Initiative files: {grand_written}/{len(initiative_files)} written to {args.output}/")
+    print(f"Initiative files: {grand_written + skipped_files}/{len(initiative_files)} "
+          f"({grand_written} written, {skipped_files} already existed)")
     print(f"Items summarized: {grand_summaries}/{grand_items}")
-    print(f"Batch files: pass1={batch_num_p1}, pass2={batch_num_p2}")
     print(f"Dedup cache size: {len(summary_cache)}")
 
     if all_failed:
