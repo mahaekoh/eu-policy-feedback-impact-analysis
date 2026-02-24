@@ -87,7 +87,15 @@ def build_prefill(
         ),
         Message.from_role_and_content(Role.USER, user_prompt),
     ])
-    prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+    try:
+        prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+    except BaseException as e:
+        print(f"ERROR in render_conversation_for_completion: {type(e).__name__}: {e}")
+        print(f"  prompt_prefix: {prompt_prefix[:100]!r}")
+        print(f"  text length: {len(text)} chars")
+        print(f"  text repr (first 500): {text[:500]!r}")
+        print(f"  text repr (last 500):  {text[-500:]!r}")
+        return None
     return {"prompt_token_ids": prefill_ids}
 
 
@@ -169,6 +177,10 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
                     prefill = build_prefill(
                         encoding, chunk, DOCUMENT_PROMPT_PREFIX, reasoning_effort
                     )
+                    if prefill is None:
+                        print(f"  {filename} {list_name}[{doc_idx}] chunk {ci+1}/{len(chunks)}: "
+                              f"{len(chunk)} chars — SKIPPED (encoding failed)")
+                        continue
                     n_tokens = len(prefill["prompt_token_ids"])
                     print(f"  {filename} {list_name}[{doc_idx}] chunk {ci+1}/{len(chunks)}: "
                           f"{len(chunk)} chars, {n_tokens} tokens")
@@ -200,6 +212,10 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
                     prefill = build_prefill(
                         encoding, chunk, FEEDBACK_ATTACHMENT_PROMPT_PREFIX, reasoning_effort
                     )
+                    if prefill is None:
+                        print(f"  {filename} fb={fb.get('id','?')} att={att.get('id','?')} "
+                              f"chunk {ci+1}/{len(chunks)}: {len(chunk)} chars — SKIPPED (encoding failed)")
+                        continue
                     n_tokens = len(prefill["prompt_token_ids"])
                     print(f"  {filename} fb={fb.get('id','?')} att={att.get('id','?')} "
                           f"chunk {ci+1}/{len(chunks)}: {len(chunk)} chars, {n_tokens} tokens")
