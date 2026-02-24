@@ -144,38 +144,30 @@ def extract_english_documents(attachments: list, pub_type: str) -> list[dict]:
 
 OCR_MIN_CHARS = 100
 OCR_MIN_FILE_BYTES = 2048
+EXTRACTABLE_EXTENSIONS = {".pdf", ".docx", ".doc", ".rtf", ".odt", ".txt"}
+
+# Extensions where we try PDF extraction first before the native pipeline
+# (many uploads are mislabeled PDFs)
+TRY_PDF_FIRST_EXTENSIONS = {".doc", ".docx", ".odt", ".rtf"}
 
 
-def download_and_extract_pdf(download_url: str, label: str = "") -> str:
-    """Download a PDF and extract its text content using pymupdf4llm.
-
-    Falls back to plain text if markdown extraction fails, then to OCR
-    (tesseract via pymupdf) if the extracted text is suspiciously short
-    relative to the file size.
-    """
-    t0 = time.time()
-    req = urllib.request.Request(download_url)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        pdf_bytes = resp.read()
+def _extract_pdf_from_bytes(data: bytes, label: str = "") -> str:
+    """Extract text from PDF bytes using pymupdf4llm with OCR fallback."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
     try:
-        os.write(tmp_fd, pdf_bytes)
+        os.write(tmp_fd, data)
         os.close(tmp_fd)
         try:
             text = pymupdf4llm.to_markdown(tmp_path)
         except (ValueError, Exception) as exc:
-            # Fallback: extract plain text when markdown extraction fails
-            # (e.g. "not a textpage of this page" on PDFs with complex graphics)
             print(f"  PDF markdown failed ({exc}), falling back to plain text: {label}")
             doc = pymupdf.open(tmp_path)
             text = "\n\n".join(page.get_text() for page in doc)
             doc.close()
 
-        # OCR fallback: if text is suspiciously short for a non-trivial PDF,
-        # the fonts likely lack proper Unicode mappings.
         stripped = text.strip() if text else ""
-        if len(stripped) < OCR_MIN_CHARS and len(pdf_bytes) > OCR_MIN_FILE_BYTES:
-            print(f"  PDF text too short ({len(stripped)} chars, {len(pdf_bytes)} bytes), falling back to OCR: {label}")
+        if len(stripped) < OCR_MIN_CHARS and len(data) > OCR_MIN_FILE_BYTES:
+            print(f"  PDF text too short ({len(stripped)} chars, {len(data)} bytes), falling back to OCR: {label}")
             doc = pymupdf.open(tmp_path)
             ocr_pages = []
             for page in doc:
@@ -183,26 +175,16 @@ def download_and_extract_pdf(download_url: str, label: str = "") -> str:
                 ocr_pages.append(page.get_text(textpage=tp))
             doc.close()
             text = "\n\n".join(ocr_pages)
+        return text
     finally:
         os.unlink(tmp_path)
-    elapsed = time.time() - t0
-    print(f"  PDF extracted ({elapsed:.1f}s, {len(pdf_bytes)} bytes): {label}")
-    return text
 
 
-def download_and_extract_docx(download_url: str, filename: str, label: str = "") -> str:
-    """Download a DOCX/DOC file and extract its text.
-
-    Uses docx2md for .docx files and textutil (macOS) for .doc files.
-    """
-    t0 = time.time()
-    suffix = Path(filename).suffix.lower() or ".docx"
-    req = urllib.request.Request(download_url)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        doc_bytes = resp.read()
+def _extract_docx_from_bytes(data: bytes, suffix: str, label: str = "") -> str:
+    """Extract text from DOCX/DOC bytes."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
-        os.write(tmp_fd, doc_bytes)
+        os.write(tmp_fd, data)
         os.close(tmp_fd)
         if suffix == ".docx":
             docx = DocxFile(tmp_path)
@@ -220,46 +202,67 @@ def download_and_extract_docx(download_url: str, filename: str, label: str = "")
             )
             text = Path(txt_path).read_text(encoding="utf-8")
             os.unlink(txt_path)
+        return text
     finally:
         os.unlink(tmp_path)
-    elapsed = time.time() - t0
-    print(f"  DOCX extracted ({elapsed:.1f}s, {len(doc_bytes)} bytes): {label}")
-    return text
 
 
-def download_and_extract_pandoc(download_url: str, filename: str, label: str = "") -> str:
-    """Download an RTF/ODT file and extract its text as markdown using pypandoc."""
-    t0 = time.time()
-    suffix = Path(filename).suffix.lower()
-    req = urllib.request.Request(download_url)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        doc_bytes = resp.read()
+def _extract_pandoc_from_bytes(data: bytes, suffix: str, label: str = "") -> str:
+    """Extract text from RTF/ODT bytes using pypandoc."""
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
-        os.write(tmp_fd, doc_bytes)
+        os.write(tmp_fd, data)
         os.close(tmp_fd)
-        text = pypandoc.convert_file(tmp_path, "markdown")
+        return pypandoc.convert_file(tmp_path, "markdown")
     finally:
         os.unlink(tmp_path)
-    elapsed = time.time() - t0
-    fmt = suffix.lstrip(".")
-    print(f"  {fmt.upper()} extracted ({elapsed:.1f}s, {len(doc_bytes)} bytes): {label}")
-    return text
 
 
-def download_and_read_text(download_url: str, label: str = "") -> str:
-    """Download a plain text file and return its contents."""
+def _extract_native_from_bytes(data: bytes, ext: str, label: str = "") -> str:
+    """Run the format-specific extraction pipeline on already-downloaded bytes."""
+    if ext == ".pdf":
+        return _extract_pdf_from_bytes(data, label)
+    elif ext in (".docx", ".doc"):
+        return _extract_docx_from_bytes(data, ext, label)
+    elif ext == ".txt":
+        return data.decode("utf-8", errors="replace")
+    elif ext in (".rtf", ".odt"):
+        return _extract_pandoc_from_bytes(data, ext, label)
+    else:
+        raise ValueError(f"Unsupported extension: {ext}")
+
+
+def download_and_extract(download_url: str, filename: str, label: str = "") -> str:
+    """Download a file and extract text.
+
+    For .doc/.docx/.odt/.rtf files, tries PDF extraction first (many uploads
+    are mislabeled PDFs), then falls back to the format-specific pipeline.
+    Downloads the file once and reuses the bytes for both attempts.
+    """
     t0 = time.time()
+    ext = Path(filename).suffix.lower()
+
     req = urllib.request.Request(download_url)
     with urllib.request.urlopen(req, timeout=120) as resp:
-        raw = resp.read()
-    text = raw.decode("utf-8", errors="replace")
+        data = resp.read()
+
+    # For non-PDF extensions that are often mislabeled PDFs, try PDF first
+    if ext in TRY_PDF_FIRST_EXTENSIONS:
+        try:
+            text = _extract_pdf_from_bytes(data, label)
+            if len((text or "").strip()) >= OCR_MIN_CHARS:
+                elapsed = time.time() - t0
+                print(f"  PDF-reinterpret ({elapsed:.1f}s, {len(data)} bytes): {label}")
+                return text
+        except Exception:
+            pass  # not a PDF, fall through to native
+
+    # Native extraction for the declared format
+    text = _extract_native_from_bytes(data, ext, label)
     elapsed = time.time() - t0
-    print(f"  TXT read ({elapsed:.1f}s, {len(raw)} bytes): {label}")
+    fmt = ext.lstrip(".").upper() or "FILE"
+    print(f"  {fmt} extracted ({elapsed:.1f}s, {len(data)} bytes): {label}")
     return text
-
-
-EXTRACTABLE_EXTENSIONS = {".pdf", ".docx", ".doc", ".rtf", ".odt", ".txt"}
 
 
 def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
@@ -283,22 +286,9 @@ def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
             if ext in EXTRACTABLE_EXTENSIONS and download_url:
                 fb_label = f"feedback {feedback_id} {filename}"
                 try:
-                    if ext == ".pdf":
-                        att_record["extracted_text"] = download_and_extract_pdf(
-                            download_url, label=fb_label,
-                        )
-                    elif ext in (".docx", ".doc"):
-                        att_record["extracted_text"] = download_and_extract_docx(
-                            download_url, filename, label=fb_label,
-                        )
-                    elif ext == ".txt":
-                        att_record["extracted_text"] = download_and_read_text(
-                            download_url, label=fb_label,
-                        )
-                    else:
-                        att_record["extracted_text"] = download_and_extract_pandoc(
-                            download_url, filename, label=fb_label,
-                        )
+                    att_record["extracted_text"] = download_and_extract(
+                        download_url, filename, label=fb_label,
+                    )
                 except Exception as exc:
                     att_record["extracted_text_error"] = str(exc)
                     print(f"  EXTRACT ERROR feedback {feedback_id} {filename}: {exc}")
@@ -377,25 +367,11 @@ def fetch_all_feedback(
 
 def _extract_text_for_doc(doc: dict, pub_id: int):
     """Download and extract text for a single document. Mutates doc in place."""
-    ext = Path(doc["filename"]).suffix.lower()
     label = f"pub={pub_id} {doc['filename']}"
     try:
-        if ext == ".pdf":
-            doc["extracted_text"] = download_and_extract_pdf(
-                doc["download_url"], label=label,
-            )
-        elif ext in (".docx", ".doc"):
-            doc["extracted_text"] = download_and_extract_docx(
-                doc["download_url"], doc["filename"], label=label,
-            )
-        elif ext == ".txt":
-            doc["extracted_text"] = download_and_read_text(
-                doc["download_url"], label=label,
-            )
-        else:
-            doc["extracted_text"] = download_and_extract_pandoc(
-                doc["download_url"], doc["filename"], label=label,
-            )
+        doc["extracted_text"] = download_and_extract(
+            doc["download_url"], doc["filename"], label=label,
+        )
     except Exception as exc:
         doc["extracted_text_error"] = str(exc)
         print(f"  EXTRACT ERROR pub={pub_id} {doc['filename']}: {exc}")

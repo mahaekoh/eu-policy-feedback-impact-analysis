@@ -34,6 +34,11 @@ def main():
         "-f", "--filter", type=str, default=None,
         help="File with newline-delimited initiative IDs to include.",
     )
+    parser.add_argument(
+        "-r", "--repair-report", type=str, default=None,
+        help="Path to repair_report.json. When set, only check feedback "
+             "attachments listed in the report.",
+    )
     args = parser.parse_args()
 
     whitelist = None
@@ -41,6 +46,16 @@ def main():
         with open(args.filter, encoding="utf-8") as f:
             whitelist = {int(line.strip()) for line in f if line.strip()}
         print(f"Filtering to {len(whitelist)} initiative IDs from {args.filter}")
+
+    repair_set = None
+    if args.repair_report:
+        with open(args.repair_report, encoding="utf-8") as f:
+            repair_data = json.load(f)
+        repair_set = {
+            (r["initiative_id"], r["publication_id"], r["feedback_id"], r["attachment_id"])
+            for r in repair_data
+        }
+        print(f"Repair report: {len(repair_set)} attachments from {args.repair_report}")
 
     initiatives = scan_dir(args.source)
 
@@ -64,6 +79,15 @@ def main():
                     continue
                 fb_id = fb["id"]
                 org = fb.get("organization", "")
+
+                # Filter attachments by repair report if active
+                if repair_set is not None:
+                    attachments = [
+                        a for a in attachments
+                        if (init_id, pub_id, fb_id, a.get("id")) in repair_set
+                    ]
+                    if not attachments:
+                        continue
 
                 if args.output:
                     for att in attachments:

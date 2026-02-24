@@ -50,6 +50,11 @@ def main():
         "-f", "--filter", type=str, default=None,
         help="File with newline-delimited initiative IDs to include.",
     )
+    parser.add_argument(
+        "-r", "--repair-report", type=str, default=None,
+        help="Path to repair_report.json. When set, only check feedback "
+             "attachments listed in the report (any extension, not just .pdf).",
+    )
     args = parser.parse_args()
 
     whitelist = None
@@ -57,6 +62,17 @@ def main():
         with open(args.filter, encoding="utf-8") as f:
             whitelist = {int(line.strip()) for line in f if line.strip()}
         print(f"Filtering to {len(whitelist)} initiative IDs from {args.filter}")
+
+    # Load repair report as a set of (init_id, pub_id, fb_id, att_id) tuples
+    repair_set = None
+    if args.repair_report:
+        with open(args.repair_report, encoding="utf-8") as f:
+            repair_data = json.load(f)
+        repair_set = {
+            (r["initiative_id"], r["publication_id"], r["feedback_id"], r["attachment_id"])
+            for r in repair_data
+        }
+        print(f"Repair report: {len(repair_set)} attachments from {args.repair_report}")
 
     if args.pdf_dir:
         Path(args.pdf_dir).mkdir(parents=True, exist_ok=True)
@@ -75,8 +91,6 @@ def main():
             pub_id = pub.get("publication_id", "?")
 
             for doc in pub.get("documents", []):
-                if not doc.get("filename", "").lower().endswith(".pdf"):
-                    continue
                 text = doc.get("extracted_text", "")
                 if not text or len(text) >= 100:
                     continue
@@ -96,12 +110,14 @@ def main():
             for fb in pub.get("feedback", []):
                 fb_id = fb.get("id", "?")
                 for att in fb.get("attachments", []):
-                    if not att.get("filename", "").lower().endswith(".pdf"):
-                        continue
+                    att_id = att.get("id", "?")
+                    # When filtering by repair report, only check listed attachments
+                    if repair_set is not None:
+                        if (init_id, pub_id, fb_id, att_id) not in repair_set:
+                            continue
                     text = att.get("extracted_text", "")
                     if not text or len(text) >= 100:
                         continue
-                    att_id = att.get("id", "?")
                     pdf_name = f"{init_id}_pub{pub_id}_fb{fb_id}_att{att_id}.pdf"
                     records.append({
                         "type": "fb_att",
