@@ -39,7 +39,7 @@ from vllm import LLM, SamplingParams
 from text_utils import split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
-MAX_OUTPUT_TOKENS = 2048
+MAX_OUTPUT_TOKENS = 32768 * 4
 CHUNK_SIZE = 5000
 INITIATIVE_BATCH_SIZE = 10
 
@@ -50,22 +50,22 @@ IDENTITY_PROMPT = (
 
 DOCUMENT_PROMPT_PREFIX = (
     "The following is a section of a publication document from an EU policy initiative. "
-    "Summarize it into a text up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
+    "Summarize it into a text up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
 )
 
 FEEDBACK_ATTACHMENT_PROMPT_PREFIX = (
     "The following is a section of a feedback attachment submitted in response to an EU policy initiative. "
-    "Summarize it into a text up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
+    "Summarize it into a text up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
 )
 
 DOCUMENT_COMBINE_PREFIX = (
     "The following are summaries of consecutive sections of a publication document "
-    "from an EU policy initiative. Combine them into a single summary up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
+    "from an EU policy initiative. Combine them into a single summary up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
 )
 
 FEEDBACK_COMBINE_PREFIX = (
     "The following are summaries of consecutive sections of a feedback attachment "
-    "submitted in response to an EU policy initiative. Combine them into a single summary up to 20 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
+    "submitted in response to an EU policy initiative. Combine them into a single summary up to 10 paragraphs. Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points).\n\n"
 )
 
 
@@ -91,14 +91,11 @@ def build_prefill(
     return {"prompt_token_ids": prefill_ids}
 
 
-_EXTRACT_ERROR = object()  # sentinel for failed extractions
-
-
 def extract_final_texts(outputs, encoding: HarmonyEncoding) -> list:
     """Extract the 'final' channel text from each vLLM output.
 
     Returns a list with one entry per output. Successful entries are strings.
-    Failed entries are the _EXTRACT_ERROR sentinel.
+    Failed entries are None.
     """
     results = []
     for i, output in enumerate(outputs):
@@ -110,10 +107,12 @@ def extract_final_texts(outputs, encoding: HarmonyEncoding) -> list:
             for message in entries:
                 if message.channel == "final":
                     final_message = message.content[0].text
-            results.append(final_message if final_message else gen.text.strip())
+            if final_message is None:
+                print(f"  WARNING: no 'final' channel in output {i}")
+            results.append(final_message)
         except Exception as e:
             print(f"  WARNING: failed to parse output {i}: {e}")
-            results.append(_EXTRACT_ERROR)
+            results.append(None)
     return results
 
 
@@ -317,7 +316,7 @@ def run_batch_inference(llm, sampling_params, encoding, prompts, prompt_texts,
             for k, summary in enumerate(batch_summaries):
                 j = infer_indices[k]
                 item_key, chunk_idx = prompt_map[j]
-                if summary is _EXTRACT_ERROR:
+                if summary is None:
                     batch_errors += 1
                     failed_prompts.append({
                         "item_key": item_key,
@@ -431,7 +430,7 @@ def main():
         help=f"Max output tokens per summary (default: {MAX_OUTPUT_TOKENS}).",
     )
     parser.add_argument(
-        "--max-model-len", type=int, default=None,
+        "--max-model-len", type=int, default=32768*4,
         help="Max model context length. Set lower to reduce GPU memory usage.",
     )
     parser.add_argument(
