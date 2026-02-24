@@ -448,6 +448,10 @@ def main():
         help="Number of prompts per inference batch (default: 32).",
     )
     parser.add_argument(
+        "--max-combine-chunks", type=int, default=4,
+        help="Max summaries to combine per inference call in pass 2 (default: 4).",
+    )
+    parser.add_argument(
         "--initiative-batch-size", type=int, default=INITIATIVE_BATCH_SIZE,
         help=f"Number of initiative files to load at a time (default: {INITIATIVE_BATCH_SIZE}).",
     )
@@ -560,7 +564,7 @@ def main():
 
         # === Assemble final summaries ===
         final_summaries = {}
-        pass2_items = []
+        current_parts = {}  # item_idx -> list of summaries at current level
 
         for item_idx in range(n_items):
             n_chunks = item_chunk_counts[item_idx]
@@ -579,38 +583,70 @@ def main():
                         complete = False
                         break
                 if complete and parts:
-                    pass2_items.append((item_idx, "\n\n".join(parts)))
+                    current_parts[item_idx] = parts
 
         print(f"\nPass 1 results: {len(final_summaries)} single-chunk items done, "
-              f"{len(pass2_items)} multi-chunk items need pass 2")
+              f"{len(current_parts)} multi-chunk items need combining")
 
-        # === Pass 2: Combine chunk summaries for multi-chunk items ===
-        if pass2_items:
+        # === Pass 2: Recursively combine chunk summaries ===
+        max_combine = args.max_combine_chunks
+        combine_level = 0
+
+        while current_parts:
+            combine_level += 1
+
+            # Build prompts: for each item, group summaries into groups of <= max_combine
             p2_prompts = []
             p2_texts = []
             p2_prompt_map = []
 
-            for p2_idx, (item_idx, combined_text) in enumerate(pass2_items):
-                is_fb = item_is_feedback[item_idx]
-                prefix = FEEDBACK_COMBINE_PREFIX if is_fb else DOCUMENT_COMBINE_PREFIX
-                p2_prompts.append(build_prefill(encoding, combined_text, prefix, reasoning_effort))
-                p2_texts.append(combined_text)
-                p2_prompt_map.append((item_idx, 0))
+            for item_idx, parts in current_parts.items():
+                groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        # Single-element group: pass through without inference
+                        continue
+                    combined = "\n\n".join(group)
+                    is_fb = item_is_feedback[item_idx]
+                    prefix = FEEDBACK_COMBINE_PREFIX if is_fb else DOCUMENT_COMBINE_PREFIX
+                    p2_prompts.append(build_prefill(encoding, combined, prefix, reasoning_effort))
+                    p2_texts.append(combined)
+                    p2_prompt_map.append((item_idx, gi))
 
-            print(f"\n--- Pass 2: Combine summaries for {len(pass2_items)} multi-chunk items ---\n")
+            print(f"\n--- Combine level {combine_level}: {len(p2_prompts)} prompts "
+                  f"from {len(current_parts)} items ---\n")
 
-            p2_results, failed_p2, stats_p2 = run_batch_inference(
-                llm, sampling_params, encoding,
-                p2_prompts, p2_texts, p2_prompt_map,
-                args.batch_size, batch_dir_p2, summary_cache,
-                batch_num_start=batch_num_p2, label="[P2] ",
-            )
-            batch_num_p2 = stats_p2["batch_num"]
-            all_failed.extend(failed_p2)
+            # Run inference (if any prompts need it)
+            p2_results = {}
+            if p2_prompts:
+                p2_results, failed_p2, stats_p2 = run_batch_inference(
+                    llm, sampling_params, encoding,
+                    p2_prompts, p2_texts, p2_prompt_map,
+                    args.batch_size, batch_dir_p2, summary_cache,
+                    batch_num_start=batch_num_p2, label=f"[C{combine_level}] ",
+                )
+                batch_num_p2 = stats_p2["batch_num"]
+                all_failed.extend(failed_p2)
 
-            for item_idx in p2_results:
-                if 0 in p2_results[item_idx]:
-                    final_summaries[item_idx] = p2_results[item_idx][0]
+            # Collect results into next level
+            next_parts = {}
+            for item_idx, parts in current_parts.items():
+                groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                new_parts = []
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        new_parts.append(group[0])  # pass-through
+                    elif item_idx in p2_results and gi in p2_results[item_idx]:
+                        new_parts.append(p2_results[item_idx][gi])
+                    # else: failed, skip this group
+
+                if len(new_parts) == 1:
+                    final_summaries[item_idx] = new_parts[0]
+                elif len(new_parts) > 1:
+                    next_parts[item_idx] = new_parts
+                # else: all groups failed, item has no summary
+
+            current_parts = next_parts
 
         # Write output for this group
         written = write_output(args.input_dir, args.output, item_locations,

@@ -266,13 +266,18 @@ python3 src/summarize_documents.py before_after_analysis_v2/ \
 ```
 
 - **Model**: `unsloth/gpt-oss-120b` via vLLM
-- **Two-pass summarization**:
+- **Recursive summarization**:
   - **Pass 1**: each text chunk is summarized independently
-  - **Pass 2**: for multi-chunk items, chunk summaries are combined into a single final summary
+  - **Combine**: for multi-chunk items, chunk summaries are recursively combined in groups of up to `--max-combine-chunks` (default 4) until a single summary remains
 - **Prompt structure**:
-  - Publication documents: "Summarize it into exactly 5 paragraphs of exactly 5 sentences each"
-  - Feedback attachments: "Summarize it into at most 5 paragraphs of at most 5 sentences each"
-  - Both prompts include: "If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors"
+  - System identity: "You are a policy analyst who summarizes EU regulatory documents clearly and concisely"
+  - Pass 1 (chunk summarization):
+    - Publication documents: "The following is a section of a publication document from an EU policy initiative. Summarize it into exactly 5 paragraphs of exactly 5 sentences each."
+    - Feedback attachments: "The following is a section of a feedback attachment submitted in response to an EU policy initiative. Summarize it into at most 5 paragraphs of at most 5 sentences each."
+  - Combine (recursive merging):
+    - Publication documents: "The following are summaries of consecutive sections of a publication document from an EU policy initiative. Combine them into a single summary of exactly 5 paragraphs of exactly 5 sentences each."
+    - Feedback attachments: "The following are summaries of consecutive sections of a feedback attachment submitted in response to an EU policy initiative. Combine them into a single summary of at most 5 paragraphs of at most 5 sentences each."
+  - All prompts include: "If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors"
 - **Chunking**: sentence-boundary splits at 5,000 chars (configurable via `--chunk-size`)
 - **Initiative batching**: processes files in groups (default 10) to manage memory
 - **Deduplication + resume**: same as translation pipeline (cross-batch cache, batch file resume)
@@ -415,7 +420,6 @@ Same structure as the initiative JSON, with three additional top-level fields:
 | File | Contents |
 |------|----------|
 | `initiative-whitelist-145.txt` | One initiative ID per line. Used by `initiative_stats.py` and the `-f` filter on other scripts. |
-| `init-no-response-blacklist-19.txt` | Initiative IDs where the Commission published no documents after feedback. Informational. |
 | `initiatives-with-no-euc-response-after-feedback.txt` | Similar tracking list for non-responsive initiatives. |
 
 ## Running the Full Pipeline
@@ -473,9 +477,9 @@ The detail scraper uses three separate thread pools (initiative, feedback, PDF e
 
 Both translation and summarization split long texts at sentence boundaries (default 5,000 characters). The `text_utils.split_into_chunks` function tries `.!?`-followed-by-whitespace splits first, falling back to newline splits if a single sentence exceeds the limit. This keeps semantic units intact while staying within context windows.
 
-### Two-pass summarization
+### Recursive summarization
 
-For documents spanning multiple chunks, pass 1 summarizes each chunk independently, then pass 2 combines those summaries into a single coherent summary. This avoids context window overflow while maintaining global coherence.
+For documents spanning multiple chunks, pass 1 summarizes each chunk independently, then chunk summaries are recursively combined in groups of up to 4 (configurable via `--max-combine-chunks`) until a single summary remains. This avoids context window overflow while maintaining global coherence, even for very long documents with many chunks.
 
 ### In-place merge pattern
 
