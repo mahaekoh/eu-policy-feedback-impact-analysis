@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EU Initiative Viewer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: #f5f6fa;
+  color: #2d3436;
+  line-height: 1.5;
+}
+
+/* Header */
+.header {
+  background: #003399;
+  color: white;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}
+.header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+.header label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,.15);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background .15s;
+}
+.header label:hover { background: rgba(255,255,255,.25); }
+.header input[type="file"] { display: none; }
+.spinner {
+  display: none;
+  width: 20px; height: 20px;
+  border: 3px solid rgba(255,255,255,.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+.spinner.active { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.file-name { font-size: 13px; opacity: .8; }
+
+/* Loading overlay */
+.loading-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.4);
+  z-index: 200;
+  justify-content: center;
+  align-items: center;
+}
+.loading-overlay.active { display: flex; }
+.loading-box {
+  background: white;
+  padding: 32px 48px;
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,.2);
+}
+.loading-box .big-spinner {
+  width: 40px; height: 40px;
+  border: 4px solid #e0e0e0;
+  border-top-color: #003399;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  margin: 0 auto 12px;
+}
+
+/* Container */
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 80px 20px;
+  color: #636e72;
+}
+.empty-state h2 { font-size: 22px; margin-bottom: 8px; color: #2d3436; }
+
+/* Metadata panel */
+.meta-panel {
+  display: none;
+  background: white;
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+}
+.meta-panel.active { display: block; }
+.meta-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+.meta-subtitle { font-size: 14px; color: #636e72; margin-bottom: 16px; }
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.meta-item label { font-size: 11px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; display: block; }
+.meta-item span { font-size: 14px; font-weight: 500; }
+.meta-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.meta-tag {
+  font-size: 12px;
+  background: #e8f0fe;
+  color: #1a56db;
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+.meta-summary { margin-top: 12px; }
+.meta-summary h3 { font-size: 13px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; margin-bottom: 6px; }
+.meta-summary p { font-size: 14px; line-height: 1.6; }
+.meta-link { color: #003399; text-decoration: none; font-weight: 500; }
+.meta-link:hover { text-decoration: underline; }
+
+/* Tabs */
+.tabs-bar {
+  display: none;
+  background: white;
+  border-radius: 10px;
+  padding: 6px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  gap: 4px;
+}
+.tabs-bar.active { display: flex; }
+.tab-btn {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  color: #636e72;
+  transition: all .15s;
+}
+.tab-btn:hover { background: #f0f0f0; }
+.tab-btn.active { background: #003399; color: white; }
+.tab-btn .badge {
+  display: inline-block;
+  font-size: 11px;
+  background: rgba(0,0,0,.1);
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+.tab-btn.active .badge { background: rgba(255,255,255,.25); }
+
+/* Tab panes */
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* Document cards */
+.doc-card {
+  background: white;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+}
+.doc-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+.doc-label { font-weight: 600; font-size: 15px; }
+.doc-meta { font-size: 13px; color: #636e72; display: flex; gap: 12px; flex-wrap: wrap; }
+.doc-meta span::before { content: ''; }
+
+/* Expandable text */
+.text-block { margin-top: 10px; }
+.text-block-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: #003399;
+  padding: 4px 0;
+}
+.text-block-header::before {
+  content: '\25B6';
+  font-size: 10px;
+  transition: transform .15s;
+}
+.text-block-header.expanded::before { transform: rotate(90deg); }
+.text-content {
+  display: none;
+  margin-top: 8px;
+  padding: 12px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 600px;
+  overflow-y: auto;
+}
+.text-content.open { display: block; }
+.text-truncated {
+  font-size: 13px;
+  color: #636e72;
+  line-height: 1.6;
+  margin-top: 6px;
+}
+.expand-link {
+  color: #003399;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 13px;
+}
+.expand-link:hover { text-decoration: underline; }
+
+/* Feedback tab */
+.feedback-controls {
+  background: white;
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+}
+.stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+.stat-total { font-weight: 700; font-size: 15px; margin-right: 8px; }
+.type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  user-select: none;
+  border: 2px solid transparent;
+  transition: all .15s;
+  font-weight: 500;
+}
+.type-badge.inactive { opacity: .35; }
+.type-badge .count { font-weight: 700; }
+.filter-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.search-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+}
+.search-input:focus { border-color: #003399; box-shadow: 0 0 0 3px rgba(0,51,153,.1); }
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.filter-info { font-size: 13px; color: #636e72; margin-top: 8px; }
+
+/* Feedback scroll container */
+.fb-list {
+  max-height: calc(100vh - 320px);
+  min-height: 400px;
+  overflow-y: auto;
+}
+.fb-sentinel {
+  height: 1px;
+}
+.fb-load-more {
+  text-align: center;
+  padding: 16px;
+  color: #636e72;
+  font-size: 13px;
+}
+
+/* Feedback card */
+.fb-card {
+  background: white;
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  border-left: 4px solid #ddd;
+}
+.fb-card-header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.fb-date { font-size: 13px; color: #636e72; }
+.fb-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.fb-info { font-size: 13px; color: #636e72; }
+.fb-info span + span::before { content: ' \00B7 '; }
+.fb-text { margin-top: 8px; font-size: 14px; line-height: 1.6; }
+.fb-text-full { white-space: pre-wrap; word-break: break-word; }
+.fb-attachments { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eee; }
+.fb-attachments h4 { font-size: 12px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; margin-bottom: 8px; }
+.att-card {
+  background: #f8f9fa;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+.att-header { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+.att-filename { font-weight: 600; font-size: 13px; }
+.att-meta { font-size: 12px; color: #636e72; }
+.att-error { color: #d63031; font-size: 13px; margin-top: 6px; }
+
+/* Links */
+.ext-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #003399;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ext-link:hover { text-decoration: underline; }
+.ext-link .icon { font-size: 11px; opacity: .6; }
+.dl-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #003399;
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  background: #f0f4ff;
+  padding: 3px 10px;
+  border-radius: 4px;
+  transition: background .15s;
+}
+.dl-link:hover { background: #dce6f7; text-decoration: none; }
+
+/* Publications tab */
+.pub-card {
+  background: white;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  border-left: 4px solid #003399;
+}
+.pub-type { font-weight: 700; font-size: 16px; }
+.pub-meta { font-size: 13px; color: #636e72; margin: 6px 0 12px; display: flex; flex-wrap: wrap; gap: 12px; }
+.pub-counts { display: flex; gap: 16px; margin-bottom: 12px; }
+.pub-count-box {
+  background: #f0f4ff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  text-align: center;
+}
+.pub-count-num { font-size: 20px; font-weight: 700; color: #003399; }
+.pub-count-label { font-size: 11px; color: #636e72; text-transform: uppercase; }
+.pub-docs, .pub-feedback-section { margin-top: 12px; }
+.pub-section-title { font-size: 12px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; margin-bottom: 8px; font-weight: 600; }
+
+/* User type colors */
+.ut-EU_CITIZEN { background: #d4efdf; color: #1e8449; }
+.ut-COMPANY { background: #d6eaf8; color: #1a5276; }
+.ut-BUSINESS_ASSOCIATION { background: #d4e6f1; color: #154360; }
+.ut-NGO { background: #fdebd0; color: #af601a; }
+.ut-PUBLIC_AUTHORITY { background: #fadbd8; color: #922b21; }
+.ut-ACADEMIC_RESEARCH_INSTITTUTION { background: #e8daef; color: #6c3483; }
+.ut-TRADE_UNION { background: #f0e0d0; color: #6e4b3a; }
+.ut-ENVIRONMENTAL_ORGANISATION { background: #d5f5e3; color: #239b56; }
+.ut-CONSUMER_ORG { background: #d1f2eb; color: #117a65; }
+.ut-NON_EU_CITIZEN { background: #e8f8f5; color: #0e6655; }
+.ut-OTHER, .ut-unknown { background: #eaecee; color: #566573; }
+
+/* Border colors for feedback cards */
+.bl-EU_CITIZEN { border-left-color: #27ae60; }
+.bl-COMPANY { border-left-color: #2980b9; }
+.bl-BUSINESS_ASSOCIATION { border-left-color: #1a5276; }
+.bl-NGO { border-left-color: #e67e22; }
+.bl-PUBLIC_AUTHORITY { border-left-color: #c0392b; }
+.bl-ACADEMIC_RESEARCH_INSTITTUTION { border-left-color: #8e44ad; }
+.bl-TRADE_UNION { border-left-color: #8b6914; }
+.bl-ENVIRONMENTAL_ORGANISATION { border-left-color: #27ae60; }
+.bl-CONSUMER_ORG { border-left-color: #1abc9c; }
+.bl-NON_EU_CITIZEN { border-left-color: #16a085; }
+.bl-OTHER, .bl-unknown { border-left-color: #95a5a6; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .header { padding: 12px 16px; }
+  .container { padding: 12px; }
+  .meta-grid { grid-template-columns: 1fr 1fr; }
+  .tab-btn { padding: 8px 8px; font-size: 13px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>EU Initiative Viewer</h1>
+  <label>
+    <span>Load JSON file</span>
+    <input type="file" id="fileInput" accept=".json">
+  </label>
+  <div class="spinner" id="headerSpinner"></div>
+  <span class="file-name" id="fileName"></span>
+</div>
+
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-box">
+    <div class="big-spinner"></div>
+    <div>Parsing JSON...</div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="empty-state" id="emptyState">
+    <h2>No initiative loaded</h2>
+    <p>Use the "Load JSON file" button above to open an initiative JSON file.</p>
+  </div>
+
+  <div class="meta-panel" id="metaPanel"></div>
+
+  <div class="tabs-bar" id="tabsBar">
+    <button class="tab-btn active" data-tab="before">Before Feedback <span class="badge" id="badgeBefore">0</span></button>
+    <button class="tab-btn" data-tab="after">After Feedback <span class="badge" id="badgeAfter">0</span></button>
+    <button class="tab-btn" data-tab="feedback">Feedback <span class="badge" id="badgeFeedback">0</span></button>
+    <button class="tab-btn" data-tab="publications">Publications <span class="badge" id="badgePubs">0</span></button>
+  </div>
+
+  <div class="tab-pane active" id="pane-before"></div>
+  <div class="tab-pane" id="pane-after"></div>
+  <div class="tab-pane" id="pane-feedback"></div>
+  <div class="tab-pane" id="pane-publications"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- State ---
+  let data = null;
+  let filteredFeedback = [];
+  let activeTypes = new Set();
+  let searchQuery = '';
+  let hideEmpty = false;
+  const CHUNK_SIZE = 200;
+  let renderedCount = 0;
+  let fbObserver = null;
+
+  // --- User type config ---
+  const USER_TYPE_LABELS = {
+    'EU_CITIZEN': 'EU Citizen',
+    'COMPANY': 'Company',
+    'BUSINESS_ASSOCIATION': 'Business Assoc.',
+    'NGO': 'NGO',
+    'PUBLIC_AUTHORITY': 'Public Authority',
+    'ACADEMIC_RESEARCH_INSTITTUTION': 'Academic/Research',
+    'TRADE_UNION': 'Trade Union',
+    'ENVIRONMENTAL_ORGANISATION': 'Environmental Org',
+    'CONSUMER_ORG': 'Consumer Org',
+    'NON_EU_CITIZEN': 'Non-EU Citizen',
+    'OTHER': 'Other',
+  };
+
+  // --- Helpers ---
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function formatBytes(b) {
+    if (!b) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  function formatDate(d) {
+    if (!d) return '';
+    return d.replace(/\//g, '-').replace(/ .*/, '');
+  }
+
+  function truncate(text, len) {
+    if (!text || text.length <= len) return text || '';
+    return text.slice(0, len) + '...';
+  }
+
+  function utClass(ut) { return ut && USER_TYPE_LABELS[ut] ? ut : 'unknown'; }
+
+  // --- File loading ---
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('fileName').textContent = file.name;
+    document.getElementById('loadingOverlay').classList.add('active');
+    document.getElementById('headerSpinner').classList.add('active');
+
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      // setTimeout so the spinner can paint
+      setTimeout(function() {
+        try {
+          data = JSON.parse(ev.target.result);
+          render();
+        } catch (err) {
+          alert('Failed to parse JSON: ' + err.message);
+        }
+        document.getElementById('loadingOverlay').classList.remove('active');
+        document.getElementById('headerSpinner').classList.remove('active');
+      }, 50);
+    };
+    reader.readAsText(file);
+  });
+
+  // --- Tab switching ---
+  document.getElementById('tabsBar').addEventListener('click', function(e) {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('pane-' + btn.dataset.tab).classList.add('active');
+  });
+
+  // --- Main render ---
+  function render() {
+    document.getElementById('emptyState').style.display = 'none';
+    document.getElementById('metaPanel').classList.add('active');
+    document.getElementById('tabsBar').classList.add('active');
+
+    renderMeta();
+    renderDocuments('before', data.documents_before_feedback || []);
+    renderDocuments('after', data.documents_after_feedback || []);
+    renderFeedbackTab();
+    renderPublications();
+
+    // Update badges
+    document.getElementById('badgeBefore').textContent = (data.documents_before_feedback || []).length;
+    document.getElementById('badgeAfter').textContent = (data.documents_after_feedback || []).length;
+    document.getElementById('badgeFeedback').textContent = (data.middle_feedback || []).length;
+    document.getElementById('badgePubs').textContent = (data.publications || []).length;
+
+    // Activate first tab
+    document.querySelector('.tab-btn').click();
+  }
+
+  // --- Metadata ---
+  function renderMeta() {
+    const p = document.getElementById('metaPanel');
+    const portalUrl = data.url || ('https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives/' + data.id);
+    p.innerHTML = `
+      <div class="meta-title">${esc(data.short_title || 'Untitled')}</div>
+      <div class="meta-subtitle">
+        <a href="${esc(portalUrl)}" target="_blank" rel="noopener" class="meta-link">View on EU Portal</a>
+        ${data.reference ? ' &middot; ' + esc(data.reference) : ''}
+      </div>
+      <div class="meta-grid">
+        <div class="meta-item"><label>ID</label><span>${esc(String(data.id || ''))}</span></div>
+        <div class="meta-item"><label>Department</label><span>${esc(data.department || '')}</span></div>
+        <div class="meta-item"><label>Status</label><span>${esc(data.status || '')}</span></div>
+        <div class="meta-item"><label>Stage</label><span>${esc(data.stage || '')}</span></div>
+        <div class="meta-item"><label>Type of Act</label><span>${esc(data.type_of_act || '')}</span></div>
+        <div class="meta-item"><label>Published</label><span>${esc(formatDate(data.published_date))}</span></div>
+        ${data.topics && data.topics.length ? `
+          <div class="meta-item" style="grid-column: 1/-1"><label>Topics</label>
+            <div class="meta-tags">${data.topics.map(t => '<span class="meta-tag">' + esc(t) + '</span>').join('')}</div>
+          </div>` : ''}
+        ${data.policy_areas && data.policy_areas.length ? `
+          <div class="meta-item" style="grid-column: 1/-1"><label>Policy Areas</label>
+            <div class="meta-tags">${data.policy_areas.map(t => '<span class="meta-tag">' + esc(t) + '</span>').join('')}</div>
+          </div>` : ''}
+      </div>
+      ${data.summary ? `
+        <div class="meta-summary">
+          <h3>Initiative Summary</h3>
+          <p>${esc(data.summary)}</p>
+        </div>` : ''}
+    `;
+  }
+
+  // --- Documents ---
+  function renderDocuments(tabKey, docs) {
+    const pane = document.getElementById('pane-' + tabKey);
+    if (!docs.length) {
+      pane.innerHTML = '<div class="empty-state"><p>No documents in this section.</p></div>';
+      return;
+    }
+    pane.innerHTML = docs.map((doc, i) => renderDocCard(doc, tabKey + '-' + i)).join('');
+  }
+
+  function renderDocCard(doc, uid) {
+    const meta = [];
+    if (doc.filename) meta.push(esc(doc.filename));
+    if (doc.pages) meta.push(doc.pages + ' pages');
+    if (doc.size_bytes) meta.push(formatBytes(doc.size_bytes));
+    if (doc.doc_type) meta.push(esc(doc.doc_type));
+    if (doc.category) meta.push(esc(doc.category));
+
+    let html = `<div class="doc-card">
+      <div class="doc-card-header">
+        <div class="doc-label">${esc(doc.label || doc.title || doc.filename || 'Document')}</div>
+        <div class="doc-meta">${meta.map(m => '<span>' + m + '</span>').join('')}</div>
+      </div>`;
+
+    if (doc.title && doc.title !== doc.label) {
+      html += `<div style="font-size:13px;color:#636e72;margin-bottom:6px">${esc(doc.title)}</div>`;
+    }
+
+    if (doc.download_url) {
+      html += `<div style="margin-bottom:6px"><a href="${esc(doc.download_url)}" target="_blank" rel="noopener" class="dl-link"><span class="icon">\u2B07</span> Download ${esc(doc.filename || 'document')}</a></div>`;
+    }
+
+    if (doc.summary) {
+      html += renderTextBlock('Summary', doc.summary, 'sum-' + uid, true);
+    }
+    if (doc.extracted_text) {
+      html += renderTextBlock('Extracted Text', doc.extracted_text, 'ext-' + uid, false);
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  // textId is used to store/retrieve full text from data, startOpen controls default state
+  function renderTextBlock(label, text, textId, startOpen) {
+    // Store full text in a data attribute-free way
+    textStore[textId] = text;
+    const preview = truncate(text, 500);
+    const isLong = text.length > 500;
+
+    return `<div class="text-block">
+      <div class="text-block-header${startOpen ? ' expanded' : ''}" onclick="toggleText('${textId}')">
+        ${esc(label)}${isLong ? ' (' + text.length.toLocaleString() + ' chars)' : ''}
+      </div>
+      <div class="text-content${startOpen ? ' open' : ''}" id="tc-${textId}">${startOpen ? esc(text) : ''}</div>
+    </div>`;
+  }
+
+  // --- Text expand/collapse ---
+  const textStore = {};
+  window.toggleText = function(textId) {
+    const header = document.querySelector(`[onclick="toggleText('${textId}')"]`);
+    const content = document.getElementById('tc-' + textId);
+    if (!header || !content) return;
+    const isOpen = content.classList.contains('open');
+    if (isOpen) {
+      content.classList.remove('open');
+      header.classList.remove('expanded');
+      // Clear large text from DOM to save memory
+      if (textStore[textId] && textStore[textId].length > 2000) {
+        content.textContent = '';
+      }
+    } else {
+      // Lazy-load text into DOM
+      if (!content.textContent || content.textContent.length < 10) {
+        content.textContent = textStore[textId] || '';
+      }
+      content.classList.add('open');
+      header.classList.add('expanded');
+    }
+  };
+
+  // --- Feedback tab ---
+  function renderFeedbackTab() {
+    const feedback = data.middle_feedback || [];
+    const pane = document.getElementById('pane-feedback');
+
+    if (!feedback.length) {
+      pane.innerHTML = '<div class="empty-state"><p>No feedback items.</p></div>';
+      return;
+    }
+
+    // Compute stats
+    const typeCounts = {};
+    let emptyCount = 0;
+    feedback.forEach(fb => {
+      const ut = fb.user_type || 'OTHER';
+      typeCounts[ut] = (typeCounts[ut] || 0) + 1;
+      if (!fb.feedback_text && (!fb.attachments || !fb.attachments.length)) emptyCount++;
+    });
+
+    // Initialize active types (all on)
+    activeTypes = new Set(Object.keys(typeCounts));
+
+    // Auto-enable hide empty if >50% have no content
+    hideEmpty = emptyCount > feedback.length * 0.5;
+
+    // Build controls
+    let html = '<div class="feedback-controls">';
+    html += '<div class="stats-bar">';
+    html += `<span class="stat-total">${feedback.length.toLocaleString()} feedback items</span>`;
+    const sortedTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+    sortedTypes.forEach(([ut, count]) => {
+      const cls = utClass(ut);
+      const label = USER_TYPE_LABELS[ut] || ut;
+      html += `<span class="type-badge ut-${esc(cls)}" data-type="${esc(ut)}" onclick="toggleType(this)">
+        ${esc(label)} <span class="count">${count}</span>
+      </span>`;
+    });
+    html += '</div>';
+    html += '<div class="filter-row">';
+    html += '<input type="text" class="search-input" id="fbSearch" placeholder="Search feedback text, organization, name..." oninput="onFbSearch(this.value)">';
+    html += `<label class="checkbox-label"><input type="checkbox" id="fbHideEmpty" ${hideEmpty ? 'checked' : ''} onchange="onHideEmpty(this.checked)"> Hide empty feedback</label>`;
+    html += '</div>';
+    html += '<div class="filter-info" id="filterInfo"></div>';
+    html += '</div>';
+
+    // Chunked scroll container (items rendered in natural flow)
+    html += '<div class="fb-list" id="fbList"></div>';
+
+    pane.innerHTML = html;
+
+    applyFeedbackFilter();
+  }
+
+  window.toggleType = function(el) {
+    const type = el.dataset.type;
+    if (activeTypes.has(type)) {
+      activeTypes.delete(type);
+      el.classList.add('inactive');
+    } else {
+      activeTypes.add(type);
+      el.classList.remove('inactive');
+    }
+    applyFeedbackFilter();
+  };
+
+  let searchDebounce = null;
+  window.onFbSearch = function(val) {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(function() {
+      searchQuery = val.toLowerCase().trim();
+      applyFeedbackFilter();
+    }, 200);
+  };
+
+  window.onHideEmpty = function(checked) {
+    hideEmpty = checked;
+    applyFeedbackFilter();
+  };
+
+  function applyFeedbackFilter() {
+    const feedback = data.middle_feedback || [];
+    filteredFeedback = feedback.filter(fb => {
+      const ut = fb.user_type || 'OTHER';
+      if (!activeTypes.has(ut)) return false;
+      if (hideEmpty && !fb.feedback_text && (!fb.attachments || !fb.attachments.length)) return false;
+      if (searchQuery) {
+        const hay = ((fb.feedback_text || '') + ' ' + (fb.organization || '') + ' ' + (fb.first_name || '') + ' ' + (fb.surname || '')).toLowerCase();
+        if (!hay.includes(searchQuery)) return false;
+      }
+      return true;
+    });
+
+    const info = document.getElementById('filterInfo');
+    if (info) {
+      if (filteredFeedback.length === feedback.length) {
+        info.textContent = '';
+      } else {
+        info.textContent = `Showing ${filteredFeedback.length.toLocaleString()} of ${feedback.length.toLocaleString()} items`;
+      }
+    }
+
+    // Reset and render first chunk
+    renderedCount = 0;
+    const list = document.getElementById('fbList');
+    if (list) {
+      list.innerHTML = '';
+      list.scrollTop = 0;
+      renderNextChunk();
+    }
+  }
+
+  // --- Chunked infinite scroll ---
+  function renderNextChunk() {
+    const list = document.getElementById('fbList');
+    if (!list || renderedCount >= filteredFeedback.length) return;
+
+    // Remove old sentinel
+    const oldSentinel = document.getElementById('fbSentinel');
+    if (oldSentinel) oldSentinel.remove();
+
+    const end = Math.min(renderedCount + CHUNK_SIZE, filteredFeedback.length);
+    const fragment = document.createDocumentFragment();
+
+    for (let i = renderedCount; i < end; i++) {
+      fragment.appendChild(createFeedbackCard(filteredFeedback[i], i));
+    }
+    renderedCount = end;
+
+    // Add sentinel for next chunk if more items remain
+    if (renderedCount < filteredFeedback.length) {
+      const sentinel = document.createElement('div');
+      sentinel.className = 'fb-sentinel';
+      sentinel.id = 'fbSentinel';
+      fragment.appendChild(sentinel);
+
+      const loadInfo = document.createElement('div');
+      loadInfo.className = 'fb-load-more';
+      loadInfo.textContent = `Loaded ${renderedCount.toLocaleString()} of ${filteredFeedback.length.toLocaleString()}`;
+      fragment.appendChild(loadInfo);
+    }
+
+    list.appendChild(fragment);
+
+    // Observe the new sentinel
+    setupSentinelObserver();
+  }
+
+  function setupSentinelObserver() {
+    if (fbObserver) fbObserver.disconnect();
+
+    const sentinel = document.getElementById('fbSentinel');
+    if (!sentinel) return;
+
+    const list = document.getElementById('fbList');
+    fbObserver = new IntersectionObserver(function(entries) {
+      if (entries[0].isIntersecting) {
+        renderNextChunk();
+      }
+    }, { root: list, rootMargin: '400px' });
+    fbObserver.observe(sentinel);
+  }
+
+  function createFeedbackCard(fb, idx) {
+    const ut = fb.user_type || 'OTHER';
+    const cls = utClass(ut);
+    const label = USER_TYPE_LABELS[ut] || ut || 'Unknown';
+
+    const card = document.createElement('div');
+    card.className = 'fb-card bl-' + cls;
+
+    let infoParts = [];
+    if (fb.country) infoParts.push(esc(fb.country));
+    if (fb.organization) infoParts.push(esc(fb.organization));
+    if (fb.first_name || fb.surname) infoParts.push(esc(((fb.first_name || '') + ' ' + (fb.surname || '')).trim()));
+    if (fb.language) infoParts.push(esc(fb.language));
+    if (fb.company_size) infoParts.push(esc(fb.company_size));
+
+    let html = `<div class="fb-card-header">
+        <span class="fb-date">${esc(formatDate(fb.date))}</span>
+        <span class="fb-badge ut-${esc(cls)}">${esc(label)}</span>
+        ${fb.status && fb.status !== 'PUBLISHED' ? '<span class="fb-badge ut-OTHER">' + esc(fb.status) + '</span>' : ''}
+        ${fb.url ? '<a href="' + esc(fb.url) + '" target="_blank" rel="noopener" class="ext-link"><span class="icon">\u2197</span> View on EU Portal</a>' : ''}
+      </div>
+      <div class="fb-info">${infoParts.map(p => '<span>' + p + '</span>').join('')}</div>`;
+
+    if (fb.feedback_text) {
+      if (fb.feedback_text.length > 500) {
+        const truncId = 'fbtrunc-' + idx;
+        const fullId = 'fbfull-' + idx;
+        html += `<div class="fb-text">
+          <span id="${truncId}">${esc(truncate(fb.feedback_text, 500))}
+            <span class="expand-link" data-trunc="${truncId}" data-full="${fullId}" data-idx="${idx}"> Show more</span>
+          </span>
+          <span id="${fullId}" class="fb-text-full" style="display:none"></span>
+        </div>`;
+      } else {
+        html += `<div class="fb-text">${esc(fb.feedback_text)}</div>`;
+      }
+    }
+
+    if (fb.attachments && fb.attachments.length) {
+      html += '<div class="fb-attachments"><h4>Attachments (' + fb.attachments.length + ')</h4>';
+      fb.attachments.forEach((att, ai) => {
+        html += renderAttachment(att, idx, ai);
+      });
+      html += '</div>';
+    }
+
+    card.innerHTML = html;
+
+    // Wire up feedback text expand/collapse via delegation on the card
+    card.addEventListener('click', function(e) {
+      const link = e.target.closest('.expand-link[data-idx]');
+      if (!link) return;
+      e.preventDefault();
+      const i = parseInt(link.dataset.idx);
+      const truncEl = document.getElementById(link.dataset.trunc);
+      const fullEl = document.getElementById(link.dataset.full);
+      if (!truncEl || !fullEl) return;
+      if (fullEl.style.display === 'none') {
+        // Lazy-load full text
+        if (!fullEl.textContent) fullEl.textContent = filteredFeedback[i].feedback_text;
+        truncEl.style.display = 'none';
+        fullEl.style.display = '';
+        fullEl.innerHTML = esc(filteredFeedback[i].feedback_text).replace(/\n/g, '<br>') +
+          ' <span class="expand-link" data-trunc="' + link.dataset.trunc + '" data-full="' + link.dataset.full + '" data-idx="' + i + '">Show less</span>';
+      } else {
+        truncEl.style.display = '';
+        fullEl.style.display = 'none';
+      }
+    });
+
+    return card;
+  }
+
+  function renderAttachment(att, fbIdx, attIdx) {
+    const meta = [];
+    if (att.filename) meta.push(esc(att.filename));
+    if (att.pages) meta.push(att.pages + ' pages');
+    if (att.size_bytes) meta.push(formatBytes(att.size_bytes));
+
+    let html = `<div class="att-card">
+      <div class="att-header">
+        <span class="att-filename">${esc(att.filename || 'Attachment')}</span>
+        <span class="att-meta">${meta.slice(1).join(' &middot; ')}</span>
+      </div>
+      ${att.download_url ? '<div style="margin-top:4px"><a href="' + esc(att.download_url) + '" target="_blank" rel="noopener" class="dl-link"><span class="icon">\u2B07</span> Download</a></div>' : ''}`;
+
+    if (att.extracted_text_error) {
+      html += `<div class="att-error">Error: ${esc(att.extracted_text_error)}</div>`;
+    }
+
+    const prefix = 'att-' + fbIdx + '-' + attIdx;
+    if (att.summary) {
+      html += renderTextBlock('Summary', att.summary, prefix + '-sum', true);
+    }
+    if (att.extracted_text) {
+      html += renderTextBlock('Extracted Text', att.extracted_text, prefix + '-ext', false);
+    }
+    if (att.extracted_text_before_translation) {
+      html += renderTextBlock('Original (before translation)', att.extracted_text_before_translation, prefix + '-pretrans', false);
+    }
+    if (att.extracted_text_without_ocr) {
+      html += renderTextBlock('Original (without OCR)', att.extracted_text_without_ocr, prefix + '-preocr', false);
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  // --- Publications ---
+  function renderPublications() {
+    const pubs = data.publications || [];
+    const pane = document.getElementById('pane-publications');
+
+    if (!pubs.length) {
+      pane.innerHTML = '<div class="empty-state"><p>No publications.</p></div>';
+      return;
+    }
+
+    // Sort by published_date
+    const sorted = [...pubs].sort((a, b) => (a.published_date || '').localeCompare(b.published_date || ''));
+
+    pane.innerHTML = sorted.map((pub, i) => {
+      const meta = [];
+      if (pub.reference) meta.push(esc(pub.reference));
+      if (pub.published_date) meta.push('Published: ' + esc(formatDate(pub.published_date)));
+      if (pub.feedback_end_date) meta.push('Feedback until: ' + esc(formatDate(pub.feedback_end_date)));
+      if (pub.feedback_status) meta.push(esc(pub.feedback_status));
+
+      const docs = pub.documents || [];
+      const fbs = pub.feedback || [];
+
+      const portalUrl = data.url || ('https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives/' + data.id);
+
+      let html = `<div class="pub-card">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div class="pub-type">${esc(pub.type || pub.section_label || 'Publication')}</div>
+          <a href="${esc(portalUrl)}" target="_blank" rel="noopener" class="ext-link"><span class="icon">\u2197</span> View on EU Portal</a>
+        </div>
+        <div class="pub-meta">${meta.map(m => '<span>' + m + '</span>').join('')}</div>
+        <div class="pub-counts">
+          <div class="pub-count-box"><div class="pub-count-num">${docs.length}</div><div class="pub-count-label">Documents</div></div>
+          <div class="pub-count-box"><div class="pub-count-num">${pub.total_feedback || fbs.length}</div><div class="pub-count-label">Feedback</div></div>
+          ${pub.feedback_period_weeks ? '<div class="pub-count-box"><div class="pub-count-num">' + pub.feedback_period_weeks + '</div><div class="pub-count-label">Weeks open</div></div>' : ''}
+        </div>`;
+
+      if (docs.length) {
+        html += '<div class="pub-docs"><div class="pub-section-title">Documents</div>';
+        docs.forEach((doc, di) => {
+          html += renderDocCard(doc, 'pub-' + i + '-doc-' + di);
+        });
+        html += '</div>';
+      }
+
+      html += '</div>';
+      return html;
+    }).join('');
+  }
+
+})();
+</script>
+</body>
+</html>
