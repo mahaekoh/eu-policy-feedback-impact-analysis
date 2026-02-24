@@ -11,12 +11,6 @@ from pathlib import Path
 DOWNLOAD_WORKERS = 20
 
 
-def scan_jsonl(jsonl_path):
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            yield json.loads(line)
-
-
 def scan_dir(dir_path):
     for fname in sorted(os.listdir(dir_path)):
         if fname.endswith(".json"):
@@ -41,9 +35,8 @@ def main():
         description="Find PDF attachments with suspiciously short extracted text."
     )
     parser.add_argument(
-        "source", nargs="?", default=None,
-        help="Path to JSONL file or directory of JSON files. "
-             "Defaults to eu_initiative_details.jsonl.",
+        "source",
+        help="Path to initiative_details/ directory.",
     )
     parser.add_argument(
         "-p", "--pdf-dir", type=str, default=None,
@@ -59,8 +52,6 @@ def main():
     )
     args = parser.parse_args()
 
-    source = Path(args.source) if args.source else Path(__file__).parent.parent / "eu_initiative_details.jsonl"
-
     whitelist = None
     if args.filter:
         with open(args.filter, encoding="utf-8") as f:
@@ -70,10 +61,7 @@ def main():
     if args.pdf_dir:
         Path(args.pdf_dir).mkdir(parents=True, exist_ok=True)
 
-    if source.is_dir():
-        initiatives = scan_dir(source)
-    else:
-        initiatives = scan_jsonl(source)
+    initiatives = scan_dir(args.source)
 
     # First pass: collect all short-extraction records
     records = []

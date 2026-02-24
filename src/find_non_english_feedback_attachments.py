@@ -7,12 +7,6 @@ import sys
 from pathlib import Path
 
 
-def scan_jsonl(jsonl_path):
-    with open(jsonl_path, encoding="utf-8") as f:
-        for line in f:
-            yield json.loads(line)
-
-
 def scan_dir(dir_path):
     for fname in sorted(os.listdir(dir_path)):
         if fname.endswith(".json"):
@@ -29,9 +23,8 @@ def main():
         description="Find non-English feedback attachments in initiative data."
     )
     parser.add_argument(
-        "source", nargs="?", default=None,
-        help="Path to JSONL file or directory of JSON files. "
-             "Defaults to eu_initiative_details.jsonl.",
+        "source",
+        help="Path to initiative_details/ directory.",
     )
     parser.add_argument(
         "-o", "--output", type=str, default=None,
@@ -43,18 +36,13 @@ def main():
     )
     args = parser.parse_args()
 
-    source = Path(args.source) if args.source else Path(__file__).parent.parent / "eu_initiative_details.jsonl"
-
     whitelist = None
     if args.filter:
         with open(args.filter, encoding="utf-8") as f:
             whitelist = {int(line.strip()) for line in f if line.strip()}
         print(f"Filtering to {len(whitelist)} initiative IDs from {args.filter}")
 
-    if source.is_dir():
-        initiatives = scan_dir(source)
-    else:
-        initiatives = scan_jsonl(source)
+    initiatives = scan_dir(args.source)
 
     total = 0
     records = []

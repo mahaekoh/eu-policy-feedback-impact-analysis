@@ -4,7 +4,7 @@ Scrape detailed attributes for each EU "Have Your Say" initiative.
 Reads initiative URLs from eu_initiatives.csv (produced by scrape_eu_initiatives.py)
 and fetches per-initiative detail from the BRP API.
 
-Outputs: eu_initiative_details.jsonl  (one JSON object per line per initiative)
+Outputs: initiative_details/*.json  (one JSON file per initiative)
 
 Uses two thread pools: one for initiatives (20 workers), one for feedback
 pages within each initiative to avoid deadlocks.
@@ -500,24 +500,16 @@ def main(out_dir: str = None):
         rows = list(csv.DictReader(f))
     print(f"Loaded {len(rows)} initiatives from {csv_path.name}")
 
-    if out_dir:
-        out_path = Path(out_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-        # Resume: check which IDs already have files
-        done_ids = set()
-        for p in out_path.glob("*.json"):
-            try:
-                done_ids.add(int(p.stem))
-            except ValueError:
-                pass
-        print(f"Output dir: {out_path}")
-    else:
-        out_path = Path(__file__).parent.parent / "eu_initiative_details.jsonl"
-        done_ids = set()
-        if out_path.exists():
-            with open(out_path, encoding="utf-8") as f:
-                for line in f:
-                    done_ids.add(json.loads(line)["id"])
+    out_path = Path(out_dir) if out_dir else Path(__file__).parent.parent / "initiative_details"
+    out_path.mkdir(parents=True, exist_ok=True)
+    # Resume: check which IDs already have files
+    done_ids = set()
+    for p in out_path.glob("*.json"):
+        try:
+            done_ids.add(int(p.stem))
+        except ValueError:
+            pass
+    print(f"Output dir: {out_path}")
 
     if done_ids:
         print(f"Resuming — {len(done_ids)} already scraped")
@@ -529,11 +521,6 @@ def main(out_dir: str = None):
     write_lock = threading.Lock()
     done_count = len(done_ids)
     error_count = 0
-
-    # Only open JSONL file if not using per-file output
-    out_file = None
-    if not out_dir:
-        out_file = open(out_path, "a", encoding="utf-8")
 
     # Separate pools to avoid deadlock with initiative pool
     fb_executor = ThreadPoolExecutor(max_workers=FEEDBACK_WORKERS)
@@ -554,13 +541,9 @@ def main(out_dir: str = None):
             n_fb = sum(len(p["feedback"]) for p in record["publications"])
             total_elapsed = t_end - t_start
             with write_lock:
-                if out_dir:
-                    file_path = out_path / f"{init_id}.json"
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(record, f, ensure_ascii=False, indent=2)
-                else:
-                    out_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    out_file.flush()
+                file_path = out_path / f"{init_id}.json"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(record, f, ensure_ascii=False, indent=2)
                 done_count += 1
                 dc = done_count
             print(
@@ -574,13 +557,9 @@ def main(out_dir: str = None):
             t_end = time.time()
             error_record = {"id": int(init_id), "url": url, "error": str(exc)}
             with write_lock:
-                if out_dir:
-                    file_path = out_path / f"{init_id}.json"
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(error_record, f, ensure_ascii=False, indent=2)
-                else:
-                    out_file.write(json.dumps(error_record, ensure_ascii=False) + "\n")
-                    out_file.flush()
+                file_path = out_path / f"{init_id}.json"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(error_record, f, ensure_ascii=False, indent=2)
                 done_count += 1
                 error_count += 1
                 dc = done_count
@@ -600,26 +579,15 @@ def main(out_dir: str = None):
     finally:
         fb_executor.shutdown(wait=False)
         pdf_executor.shutdown(wait=False)
-        if out_file:
-            out_file.close()
 
     # Summary
-    if out_dir:
-        total_written = len(list(out_path.glob("*.json")))
-        errors = 0
-        for p in out_path.glob("*.json"):
-            with open(p, encoding="utf-8") as f:
-                if "error" in json.load(f):
-                    errors += 1
-        print(f"\nDone. {total_written} initiatives saved to {out_path} ({errors} errors)")
-    else:
-        total_written = errors = 0
-        with open(out_path, encoding="utf-8") as f:
-            for line in f:
-                total_written += 1
-                if "error" in json.loads(line):
-                    errors += 1
-        print(f"\nDone. {total_written} initiatives saved to {out_path.name} ({errors} errors)")
+    total_written = len(list(out_path.glob("*.json")))
+    errors = 0
+    for p in out_path.glob("*.json"):
+        with open(p, encoding="utf-8") as f:
+            if "error" in json.load(f):
+                errors += 1
+    print(f"\nDone. {total_written} initiatives saved to {out_path} ({errors} errors)")
 
 
 def scrape_one(init_id: int):
@@ -657,7 +625,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o", "--out-dir", type=str, default=None,
         help="Output directory for per-initiative JSON files. "
-             "If omitted, appends to eu_initiative_details.jsonl.",
+             "Defaults to initiative_details/.",
     )
     args = parser.parse_args()
 
