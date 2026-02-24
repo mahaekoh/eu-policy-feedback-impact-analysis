@@ -470,32 +470,18 @@ def main():
         print("Nothing to do.")
         return
 
-    # Build groups and check which need processing
+    # Resume: skip files whose output already exists
     os.makedirs(args.output, exist_ok=True)
-    all_groups = []
-    pending_groups = []
-    skipped_files = 0
-    for group_start in range(0, len(initiative_files), args.initiative_batch_size):
-        group_files = initiative_files[group_start:group_start + args.initiative_batch_size]
-        all_groups.append(group_files)
-
-    n_groups = len(all_groups)
-    for group_idx, group_files in enumerate(all_groups):
-        all_exist = all(
-            os.path.isfile(os.path.join(args.output, f))
-            for f in group_files
-        )
-        if all_exist:
-            skipped_files += len(group_files)
-            print(f"Group {group_idx+1}/{n_groups}: "
-                  f"all {len(group_files)} output files exist, skipping")
-        else:
-            pending_groups.append((group_idx, group_files))
+    pending_files = [
+        f for f in initiative_files
+        if not os.path.isfile(os.path.join(args.output, f))
+    ]
+    skipped_files = len(initiative_files) - len(pending_files)
     if skipped_files:
-        print(f"\nResume: {skipped_files}/{len(initiative_files)} files already exist, "
-              f"{len(pending_groups)}/{n_groups} groups need processing")
+        print(f"Resume: {skipped_files}/{len(initiative_files)} output files already exist, "
+              f"{len(pending_files)} remaining")
 
-    if not pending_groups:
+    if not pending_files:
         print("\nAll output files already exist. Nothing to do.")
         return
 
@@ -531,9 +517,12 @@ def main():
 
     t_total_start = time.time()
 
-    for pending_idx, (group_idx, group_files) in enumerate(pending_groups):
+    n_groups = (len(pending_files) + args.initiative_batch_size - 1) // args.initiative_batch_size
+
+    for group_idx in range(n_groups):
         group_start = group_idx * args.initiative_batch_size
-        group_end = group_start + len(group_files)
+        group_end = min(group_start + args.initiative_batch_size, len(pending_files))
+        group_files = pending_files[group_start:group_end]
 
         # Per-group batch directories (local batch numbering, groups are independent)
         batch_dir_p1 = os.path.join(args.output, "_batches_pass1", f"group_{group_idx:04d}")
@@ -542,8 +531,8 @@ def main():
         os.makedirs(batch_dir_p2, exist_ok=True)
 
         print(f"\n{'='*60}")
-        print(f"Group {group_idx+1}/{n_groups} (pending {pending_idx+1}/{len(pending_groups)}): "
-              f"initiatives {group_start+1}-{group_end}/{len(initiative_files)} "
+        print(f"Group {group_idx+1}/{n_groups}: "
+              f"files {group_start+1}-{group_end}/{len(pending_files)} "
               f"({len(group_files)} files)")
         print(f"{'='*60}\n")
 
