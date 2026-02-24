@@ -40,6 +40,139 @@ IDENTITY_PROMPT = (
     "by their stance on nuclear energy."
 )
 
+COMPLEX_CLASSIFICATION_PROMPT_PREFIX = '''
+You are analysing European Commission policy documents.
+Your task is to classify how the Commission positions nuclear energy within EU climate and energy policy initiatives and to identify the dominant legitimacy logic used to justify that positioning.
+You must follow the steps strictly and apply the hierarchy rules exactly as written.
+ 
+STEP 0 — UNIT OF ANALYSIS
+Aggregate all documents belonging to the same initiative (initiative_id).
+Classification must be made at the initiative level, not at the sentence level.
+ 
+STEP 1 — RELEVANCE FILTER
+Proceed only if:
+•	Nuclear energy (or SMR) is mentioned
+AND
+•	The mention appears in the context of climate mitigation, decarbonisation, emissions reduction, energy system governance, electricity generation, energy security, transition policy, or energy-related regulation.
+Exclude cases where nuclear appears only in:
+•	Medical radiation
+•	Non-energy research programmes
+•	Pure radiation protection detached from climate/energy governance
+If irrelevant → Do not classify.
+ 
+STEP 2 — DETERMINE COMMISSION STANCE
+(Outcome-Based, Integer Only)
+Commission_Stance ∈ {+1, 0, -1}
+Apply rules hierarchically.
+ 
+RULE 1 — Explicit Exclusion or Restrictive Outcome
+If the initiative contains language indicating that nuclear energy:
+•	is not included
+•	is excluded
+•	is not eligible
+•	does not meet the criteria
+•	is outside the scope
+•	will not be supported
+•	is rejected
+→ Commission_Stance = -1
+This rule overrides all other language.
+Recognition of climate benefits does NOT override explicit exclusion.
+Example (verified from dataset):
+“While nuclear energy contributes to climate change mitigation… it is not included…”
+→ -1 because operative regulatory outcome = non-inclusion.
+ 
+RULE 2 — Explicit Inclusion or Supportive Integration
+If no exclusion is present AND nuclear is:
+•	Included in the policy instrument
+•	Eligible under criteria
+•	Integrated into climate/energy transition strategy
+•	Operationalised as contributing to decarbonisation
+→ Commission_Stance = +1
+Conditional inclusion counts as +1.
+Example:
+“Nuclear energy contributes to the energy system and supports decarbonisation.”
+If inclusion is operational (not merely theoretical), classify +1.
+ 
+RULE 3 — Procedural / Descriptive / Neutral
+If nuclear is:
+•	Described technically
+•	Presented in modelling scenarios
+•	Framed as Member State competence
+•	Mentioned in regulatory governance without inclusion/exclusion decision
+•	Deferred pending assessment without final decision
+→ Commission_Stance = 0
+Example (verified):
+“These policy levers remain the national prerogative… in the case of nuclear energy.”
+→ 0 (procedural neutrality).
+ 
+STEP 3 — IDENTIFY DOMINANT LEGITIMACY LOGIC
+This layer captures how the Commission justifies its stance.
+Legitimacy_Mode ∈ {Technocratic, Input, Procedural-Institutional}
+Determine which logic is used to justify the final decision clause (the clause determining inclusion/exclusion/deferral).
+ 
+A. Technocratic Legitimacy
+Assign if justification relies primarily on:
+•	Technical assessment
+•	Expert groups (e.g., JRC, TEG)
+•	Modelling tools (PRIMES, GAINS, METIS)
+•	Regulatory criteria
+•	“Do no significant harm”
+•	Ongoing technical evaluation
+•	Insufficient scientific evidence
+•	Need for further expert study
+Example (verified):
+“The TEG did not put forward a conclusive recommendation… more extensive technical work is undertaken on the DNSH aspects of nuclear energy.”
+If exclusion or deferral is justified via technical criteria → Technocratic.
+ 
+B. Input Legitimacy
+Assign if the final stance is justified primarily by:
+•	Majority stakeholder demand
+•	Public consultation results
+•	Respondents’ preferences
+•	Explicit reference to consultation outcome as basis for decision
+Example (verified descriptive language):
+“Several respondents commented that they would like to see nuclear energy included…”
+If the decision clause explicitly refers to consultation outcome as justification → Input.
+Note: Mere mention of consultation without linking it to the decision does NOT qualify.
+ 
+C. Procedural-Institutional Legitimacy
+Assign if justification relies on:
+•	Treaty competence
+•	Subsidiarity
+•	Member State prerogative
+•	Institutional division of powers
+•	Legal mandate boundaries
+Example (verified):
+“These policy levers remain the national prerogative… as indicated in the EURATOM Treaty.”
+If decision is justified via competence or institutional constraint → Procedural-Institutional.
+ 
+STEP 4 — DOMINANCE RULE
+If multiple legitimacy logics appear:
+Select the one directly linked to the operative decision clause.
+Example:
+If text mentions stakeholders BUT final exclusion is justified via DNSH criteria → Dominant = Technocratic.
+Decision-justifying clause determines legitimacy mode.
+ 
+STEP 5 — TREATMENT OF SILENCE
+If public consultation heavily discussed nuclear but Commission initiative:
+•	Does not mention nuclear at all
+Then:
+If consultation nuclear salience is high → Commission_Stance = -1 (implicit distancing)
+Else → Commission_Stance = 0
+Legitimacy_Mode = Technocratic if silence is accompanied by technical focus elsewhere; otherwise Procedural.
+ 
+OUTPUT FORMAT
+For each initiative:
+•	initiative_id
+•	Commission_Stance (-1, 0, +1)
+•	Legitimacy_Mode (Technocratic / Input / Procedural-Institutional)
+•	Climate_Recognition_Flag (0/1)
+•	Consultation_Reference_Flag (0/1)
+
+-- BEGIN POLICY DOCUMENT SUMMARY --
+
+'''
+
 CLASSIFICATION_PROMPT_PREFIX = (
     'The following is a summary of an EU policy proposal. Generate "SUPPORT" or '
     '"OPPOSE" or "NEUTRAL" or "DOES NOT MENTION" based on whether the piece of '
@@ -133,7 +266,7 @@ def extract_label(text: str) -> str | None:
 
 def run_batch_inference(llm, sampling_params, encoding, prompts, prompt_texts,
                         prompt_map, batch_size, batch_dir, result_cache,
-                        batch_num_start=0, label=""):
+                        batch_num_start=0, label="", raw_output_mode=False):
     """Run batched inference with dedup, resume, and per-batch file output.
 
     Args:
@@ -145,9 +278,11 @@ def run_batch_inference(llm, sampling_params, encoding, prompts, prompt_texts,
         prompt_map: list of prompt key strings.
         batch_size: number of prompts per batch.
         batch_dir: directory for per-batch output files.
-        result_cache: dict of text -> label (shared across calls for dedup).
+        result_cache: dict of text -> result (shared across calls for dedup).
         batch_num_start: starting batch file number.
         label: prefix for log messages.
+        raw_output_mode: if True, store the full final text instead of
+            extracting a classification label.
 
     Returns:
         results: dict of prompt_key -> {"label": str, "reasoning": str|None}
@@ -243,21 +378,24 @@ def run_batch_inference(llm, sampling_params, encoding, prompts, prompt_texts,
                     })
                     continue
                 analysis_text, final_text = parsed
-                parsed_label = extract_label(final_text)
-                if parsed_label is None:
-                    print(f"  WARNING: no valid label found in output for {key}: {final_text!r}")
-                    failed_prompts.append({
-                        "key": key,
-                        "text_length": text_lens[j],
-                        "raw_output": final_text,
-                    })
-                    continue
-                entry = {"label": parsed_label, "reasoning": analysis_text}
+                if raw_output_mode:
+                    output_label = final_text
+                else:
+                    output_label = extract_label(final_text)
+                    if output_label is None:
+                        print(f"  WARNING: no valid label found in output for {key}: {final_text!r}")
+                        failed_prompts.append({
+                            "key": key,
+                            "text_length": text_lens[j],
+                            "raw_output": final_text,
+                        })
+                        continue
+                entry = {"label": output_label, "reasoning": analysis_text}
                 results[key] = entry
                 result_cache[prompt_texts[j]] = entry
                 batch_results.append({
                     "key": key,
-                    "label": parsed_label,
+                    "label": output_label,
                     "reasoning": analysis_text,
                     "raw_output": final_text,
                 })
@@ -379,10 +517,16 @@ def main():
 
     # Collect all prompts from pending files
     print(f"\nCollecting prompts from {len(pending_files)} initiative files...")
+
+    # Simple classification prompts (initiative-level + feedback-level)
     prompts = []
     prompt_texts = []
     prompt_map = []  # list of string keys like "12096:before", "12096:after", "12096:fb:0"
-    prompt_file_map = {}  # key -> filename
+
+    # Complex classification prompts (initiative-level only)
+    complex_prompts = []
+    complex_prompt_texts = []
+    complex_prompt_map = []  # keys like "12096:before", "12096:after"
 
     for filename in pending_files:
         filepath = os.path.join(args.input_dir, filename)
@@ -401,16 +545,28 @@ def main():
                 continue
             text = text.strip()
             key = f"{init_id}:{key_suffix}"
+
+            # Simple classification
             prefill = build_prefill(encoding, text, CLASSIFICATION_PROMPT_PREFIX, reasoning_effort)
             if prefill is None:
                 print(f"  {filename} {field}: {len(text)} chars — SKIPPED (encoding failed)")
-                continue
-            n_tokens = len(prefill["prompt_token_ids"])
-            print(f"  {filename} {field}: {len(text)} chars, {n_tokens} tokens")
-            prompts.append(prefill)
-            prompt_texts.append(text)
-            prompt_map.append(key)
-            prompt_file_map[key] = filename
+            else:
+                n_tokens = len(prefill["prompt_token_ids"])
+                print(f"  {filename} {field}: {len(text)} chars, {n_tokens} tokens")
+                prompts.append(prefill)
+                prompt_texts.append(text)
+                prompt_map.append(key)
+
+            # Complex classification
+            cprefill = build_prefill(encoding, text, COMPLEX_CLASSIFICATION_PROMPT_PREFIX, reasoning_effort)
+            if cprefill is None:
+                print(f"  {filename} {field} [complex]: {len(text)} chars — SKIPPED (encoding failed)")
+            else:
+                n_tokens = len(cprefill["prompt_token_ids"])
+                print(f"  {filename} {field} [complex]: {len(text)} chars, {n_tokens} tokens")
+                complex_prompts.append(cprefill)
+                complex_prompt_texts.append(text)
+                complex_prompt_map.append(key)
 
         # Feedback-level: each middle_feedback combined_feedback_summary
         for fb_idx, fb in enumerate(initiative.get("middle_feedback", [])):
@@ -428,12 +584,12 @@ def main():
             prompts.append(prefill)
             prompt_texts.append(text)
             prompt_map.append(key)
-            prompt_file_map[key] = filename
 
     n_prompts = len(prompts)
-    print(f"\nTotal prompts: {n_prompts}")
+    n_complex = len(complex_prompts)
+    print(f"\nTotal prompts: {n_prompts} simple + {n_complex} complex")
 
-    if n_prompts == 0:
+    if n_prompts == 0 and n_complex == 0:
         # No summaries to classify, just copy files through
         for filename in pending_files:
             filepath = os.path.join(args.input_dir, filename)
@@ -467,32 +623,61 @@ def main():
         stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
     )
 
-    # Run inference (one pass per run, each with its own batch dir and cache)
+    # === Simple classification runs ===
     n_runs = args.runs
     all_run_results = []  # list of per-run result dicts
     all_failed = []
     t_total_start = time.time()
 
-    for run_idx in range(n_runs):
-        run_label = f"[run {run_idx+1}/{n_runs}] " if n_runs > 1 else ""
-        if n_runs > 1:
-            print(f"\n{'='*60}")
-            print(f"Run {run_idx+1}/{n_runs}")
-            print(f"{'='*60}\n")
+    if n_prompts > 0:
+        print(f"\n--- Simple classification ({n_prompts} prompts x {n_runs} runs) ---")
+        for run_idx in range(n_runs):
+            run_label = f"[simple run {run_idx+1}/{n_runs}] " if n_runs > 1 else ""
+            if n_runs > 1:
+                print(f"\n{'='*60}")
+                print(f"Simple classification run {run_idx+1}/{n_runs}")
+                print(f"{'='*60}\n")
 
-        batch_dir = os.path.join(args.output, f"_batches_run_{run_idx}")
-        os.makedirs(batch_dir, exist_ok=True)
+            batch_dir = os.path.join(args.output, f"_batches_run_{run_idx}")
+            os.makedirs(batch_dir, exist_ok=True)
 
-        result_cache = {}  # fresh cache per run for independent samples
+            result_cache = {}  # fresh cache per run for independent samples
 
-        results, failed_prompts, stats = run_batch_inference(
-            llm, sampling_params, encoding,
-            prompts, prompt_texts, prompt_map,
-            args.batch_size, batch_dir, result_cache,
-            batch_num_start=0, label=run_label,
-        )
-        all_run_results.append(results)
-        all_failed.extend(failed_prompts)
+            results, failed_prompts, stats = run_batch_inference(
+                llm, sampling_params, encoding,
+                prompts, prompt_texts, prompt_map,
+                args.batch_size, batch_dir, result_cache,
+                batch_num_start=0, label=run_label,
+            )
+            all_run_results.append(results)
+            all_failed.extend(failed_prompts)
+
+    # === Complex classification runs ===
+    all_complex_run_results = []  # list of per-run result dicts
+
+    if n_complex > 0:
+        print(f"\n--- Complex classification ({n_complex} prompts x {n_runs} runs) ---")
+        for run_idx in range(n_runs):
+            run_label = f"[complex run {run_idx+1}/{n_runs}] " if n_runs > 1 else ""
+            if n_runs > 1:
+                print(f"\n{'='*60}")
+                print(f"Complex classification run {run_idx+1}/{n_runs}")
+                print(f"{'='*60}\n")
+
+            batch_dir = os.path.join(args.output, f"_batches_complex_run_{run_idx}")
+            os.makedirs(batch_dir, exist_ok=True)
+
+            result_cache = {}  # fresh cache per run
+
+            results, failed_prompts, stats = run_batch_inference(
+                llm, sampling_params, encoding,
+                complex_prompts, complex_prompt_texts, complex_prompt_map,
+                args.batch_size, batch_dir, result_cache,
+                batch_num_start=0, label=run_label,
+                raw_output_mode=True,
+            )
+            all_complex_run_results.append(results)
+            all_failed.extend(failed_prompts)
 
     total_elapsed = time.time() - t_total_start
 
@@ -509,8 +694,9 @@ def main():
         before_key = f"{init_id}:before"
         after_key = f"{init_id}:after"
 
+        # Simple classification results
         if n_runs == 1:
-            results = all_run_results[0]
+            results = all_run_results[0] if all_run_results else {}
             if before_key in results:
                 initiative["before_feedback_nuclear_stance"] = results[before_key]["label"]
                 initiative["before_feedback_nuclear_stance_reasoning"] = results[before_key]["reasoning"]
@@ -539,6 +725,25 @@ def main():
                     fb["nuclear_stance"] = [e["label"] for e in fb_entries]
                     fb["nuclear_stance_reasoning"] = [e["reasoning"] for e in fb_entries]
 
+        # Complex classification results
+        if n_runs == 1:
+            cresults = all_complex_run_results[0] if all_complex_run_results else {}
+            if before_key in cresults:
+                initiative["before_feedback_nuclear_stance_complex"] = cresults[before_key]["label"]
+                initiative["before_feedback_nuclear_stance_complex_reasoning"] = cresults[before_key]["reasoning"]
+            if after_key in cresults:
+                initiative["after_feedback_nuclear_stance_complex"] = cresults[after_key]["label"]
+                initiative["after_feedback_nuclear_stance_complex_reasoning"] = cresults[after_key]["reasoning"]
+        else:
+            before_c_entries = [r[before_key] for r in all_complex_run_results if before_key in r]
+            if before_c_entries:
+                initiative["before_feedback_nuclear_stance_complex"] = [e["label"] for e in before_c_entries]
+                initiative["before_feedback_nuclear_stance_complex_reasoning"] = [e["reasoning"] for e in before_c_entries]
+            after_c_entries = [r[after_key] for r in all_complex_run_results if after_key in r]
+            if after_c_entries:
+                initiative["after_feedback_nuclear_stance_complex"] = [e["label"] for e in after_c_entries]
+                initiative["after_feedback_nuclear_stance_complex_reasoning"] = [e["reasoning"] for e in after_c_entries]
+
         out_path = os.path.join(args.output, filename)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(initiative, f, ensure_ascii=False, indent=2)
@@ -550,16 +755,18 @@ def main():
     print(f"{'='*60}")
     print(f"Initiative files: {written + skipped_files}/{len(initiative_files)} "
           f"({written} written, {skipped_files} already existed)")
-    total_classifications = sum(len(r) for r in all_run_results)
-    print(f"Classifications: {total_classifications}/{n_prompts * n_runs}")
+    total_simple = sum(len(r) for r in all_run_results)
+    total_complex = sum(len(r) for r in all_complex_run_results)
+    print(f"Simple classifications: {total_simple}/{n_prompts * n_runs}")
+    print(f"Complex classifications: {total_complex}/{n_complex * n_runs}")
 
-    # Print label distribution (aggregated across all runs)
+    # Print label distribution (simple, aggregated across all runs)
     label_counts = {}
     for results in all_run_results:
         for entry in results.values():
             lbl = entry["label"]
             label_counts[lbl] = label_counts.get(lbl, 0) + 1
-    print(f"Label distribution: {label_counts}")
+    print(f"Simple label distribution: {label_counts}")
 
     if all_failed:
         failed_file = os.path.join(args.output, "_failed.json")
