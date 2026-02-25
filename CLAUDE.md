@@ -1,0 +1,96 @@
+# EU "Have Your Say" Initiative Data Pipeline
+
+This project scrapes, processes, and enriches EU Better Regulation "Have Your Say" initiative data.
+
+## Data flow
+
+```
+scrape_eu_initiatives.py          → eu_initiatives.csv
+scrape_eu_initiative_details.py   → initiative_details/*.json  (per-initiative JSON, with text extraction)
+find_short_pdf_extractions.py     → short_pdf_report.json + short_pdfs/
+ocr_short_pdfs.py                 → short_pdf_report_ocr.json
+merge_ocr_results.py              → updates initiative_details/*.json in-place
+find_non_english_feedback_attachments.py → non_english_attachments.json
+translate_attachments.py          → non_english_attachments_translated.json
+merge_translations.py             → updates initiative_details/*.json in-place
+initiative_stats.py               → analysis + before_after_output/*.json (with -o)
+summarize_documents.py            → summaries_output/*.json (with summary fields added)
+build_unit_summaries.py           → unit_summaries/*.json (unified per-initiative summaries)
+```
+
+### Repair pipeline (re-extracts broken attachments, then re-runs OCR + translation)
+
+```
+repair_broken_attachments.py      → repaired_details/*.json + repaired_details/repair_report.json
+find_short_pdf_extractions.py -r  → short_pdf_report.json + short_pdfs/  (scoped to repaired attachments)
+ocr_short_pdfs.py                 → short_pdf_report_ocr.json
+merge_ocr_results.py              → updates repaired_details/*.json in-place
+find_non_english_feedback_attachments.py -r → non_english_attachments.json  (scoped to repaired attachments)
+translate_attachments.py          → non_english_attachments_translated.json
+merge_translations.py             → updates repaired_details/*.json in-place
+```
+
+**Important:** When using `-r repair_report.json` with `find_non_english_feedback_attachments.py` or `find_short_pdf_extractions.py`, point the source at the *repaired* output directory (not the original `initiative_details/`), since the repaired JSONs are the ones with the newly extracted text.
+
+## Scripts
+
+### Scraping
+
+**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API. Outputs `eu_initiatives.csv`.
+
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `initiative_details/`.
+
+### Analysis / reporting
+
+**`src/find_missing_initiatives.py`** — Reports initiative IDs present in the CSV but missing from `initiative_details/`, or with incomplete feedback data.
+
+**`src/find_initiative_by_pub.py`** — Lookup utility: finds which initiative contains a given publication ID.
+
+**`src/find_missing_extracted_text.py`** — Scans initiative data for publication documents and feedback attachments that have no `extracted_text`.
+
+**`src/find_non_english_feedback_attachments.py`** — Finds feedback attachments where the feedback language is not English. Supports `-o` for JSON output with full metadata, `-f` for initiative ID whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
+
+**`src/find_short_pdf_extractions.py`** — Finds attachments where `extracted_text` is suspiciously short (<100 chars). Checks all attachment types regardless of file extension (since many non-PDF extensions are actually PDFs). Downloads files in parallel (20 workers). Supports `-p` for PDF output directory, `-o` for JSON report, `-f` for whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
+
+### OCR pipeline
+
+**`src/ocr_short_pdfs.py`** — GPU-accelerated OCR using EasyOCR with CUDA. Renders PDF pages to 300 DPI images via pymupdf, runs OCR, writes results to JSON. Designed for H100.
+
+**`src/merge_ocr_results.py`** — Merges OCR results back into initiative JSON files. Replaces `extracted_text`, preserves original as `extracted_text_without_ocr`. Supports `--dry-run`.
+
+### Translation pipeline
+
+**`src/translate_attachments.py`** — Translates non-English feedback attachment texts to English using vLLM batch inference with `unsloth/gpt-oss-120b`. Uses `openai_harmony` for structured prompts with `ReasoningEffort.MEDIUM`. Long documents are chunked at sentence boundaries (default 5000 chars). Chunks returning "NO TRANSLATION NEEDED" are replaced with the original text during reassembly.
+
+**`src/merge_translations.py`** — Merges translations back into initiative JSON files. Replaces `extracted_text`, preserves original as `extracted_text_before_translation`. Skips records containing "NO TRANSLATION NEEDED". Supports `--dry-run`.
+
+### Summarization pipeline
+
+**`src/initiative_stats.py`** — Analyzes initiative publication/feedback structure. With `-o`, writes per-initiative JSONs with `documents_before_feedback`, `documents_after_feedback`, and `middle_feedback` attributes for initiatives that have documents after first feedback.
+
+**`src/summarize_documents.py`** — Summarizes publication documents and feedback attachments using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes the output of `initiative_stats.py -o`. Long texts are split into chunks at sentence boundaries (default 5000 chars), each chunk is summarized (pass 1), then multi-chunk summaries are recursively combined in groups of up to `--max-combine-chunks` (default 4) until a single summary remains. Both documents and feedback attachments are summarized into up to 10 paragraphs per chunk, and combined summaries are also up to 10 paragraphs. Adds `summary` field to each document and attachment object. Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Within a run, per-batch result files in `_batches_pass1/group_NNNN/` and `_batches_pass2/group_NNNN/` provide crash recovery for incomplete groups.
+
+**`src/build_unit_summaries.py`** — Consolidates individual document and attachment summaries into per-initiative unified summary fields. Takes the output of `summarize_documents.py`. Adds `before_feedback_summary` (concatenation of document summaries from before feedback), `after_feedback_summary` (from after feedback), and `combined_feedback_summary` (feedback text + attachment summaries) on each middle feedback item. All concatenation joins on `\n\n`.
+
+### Repair pipeline
+
+**`src/repair_broken_attachments.py`** — Scans `initiative_details/` for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the format-specific pipeline. Writes updated initiative JSON copies to a specified output directory (only files with at least one successful repair). Also writes `repair_report.json` — a machine-readable list of all repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, which can be passed as `-r` to downstream scripts to scope them to just the repaired attachments. Supports `-f` for initiative ID whitelist filter, `-w` for worker count (default 20), `--dry-run` for scanning without repairing. Adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments for traceability.
+
+### Viewer
+
+**`viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.
+
+### Utilities
+
+**`src/text_utils.py`** — Shared library. Contains `split_into_chunks(text, max_chars)` which splits text at sentence boundaries with a fallback to newline splits.
+
+**`src/print_chunk.py`** — Debug utility to print a specific chunk of a feedback attachment. Takes a spec like `"init=12096 fb=503089 att=6276475 chunk=5/15"` and the `initiative_details/` directory.
+
+## Key dependencies
+
+- **pymupdf** / **pymupdf4llm** — PDF text extraction with OCR fallback (tesseract at 300 DPI)
+- **docx2md** — DOCX text extraction
+- **pypandoc** / **pypandoc_binary** — RTF and ODT text extraction
+- **easyocr** — GPU-accelerated OCR (CUDA)
+- **vllm** — LLM batch inference engine
+- **openai_harmony** — Structured prompt encoding for gpt-oss models (reasoning effort, stop tokens, output parsing)
