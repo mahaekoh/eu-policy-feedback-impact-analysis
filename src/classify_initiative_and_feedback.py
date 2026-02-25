@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import datetime
+import glob
 import json
 import os
 import sys
@@ -476,8 +477,8 @@ def main():
         help="Sampling temperature (default: 0.15).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Number of prompts per inference batch (default: 32).",
+        "--batch-size", type=int, default=1024,
+        help="Number of prompts per inference batch (default: 1024).",
     )
     parser.add_argument(
         "--runs", type=int, default=1,
