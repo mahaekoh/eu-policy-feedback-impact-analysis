@@ -43,8 +43,11 @@ IDENTITY_PROMPT = "You are a professional translator. You translate text to Engl
 USER_PROMPT_PREFIX = '''The following is a piece of feedback for an EU policy proposal. If it's in English, simply generate "NO TRANSLATION NEEDED." If it's not in English, generate an English translation of the text. No commentary at the beginning or end.\n\n'''
 
 
-def build_prefill(encoding: HarmonyEncoding, text: str, reasoning_effort: ReasoningEffort) -> dict:
-    """Build a prompt_token_ids prefill dict for vLLM using openai_harmony."""
+def build_prefill(encoding: HarmonyEncoding, text: str, reasoning_effort: ReasoningEffort):
+    """Build a prompt_token_ids prefill dict for vLLM using openai_harmony.
+
+    Returns None if encoding fails (e.g. bad text causing stack overflow).
+    """
     user_prompt = USER_PROMPT_PREFIX + text
     convo = Conversation.from_messages([
         Message.from_role_and_content(
@@ -55,7 +58,11 @@ def build_prefill(encoding: HarmonyEncoding, text: str, reasoning_effort: Reason
         ),
         Message.from_role_and_content(Role.USER, user_prompt),
     ])
-    prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+    try:
+        prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+    except BaseException as e:
+        print(f"ERROR in render_conversation_for_completion: {type(e).__name__}: {e}")
+        return None
     return {"prompt_token_ids": prefill_ids}
 
 
@@ -144,7 +151,14 @@ def main():
         chunks = split_into_chunks(text.strip(), args.chunk_size)
         record_chunk_counts[i] = len(chunks)
         for ci, chunk in enumerate(chunks):
-            prompts.append(build_prefill(encoding, chunk, reasoning_effort))
+            prefill = build_prefill(encoding, chunk, reasoning_effort)
+            if prefill is None:
+                print(f"  WARNING: skipping chunk {ci}/{len(chunks)} for record {i} "
+                      f"(initiative {rec.get('initiative_id','?')}, "
+                      f"fb {rec.get('feedback_id','?')}, "
+                      f"att {rec.get('attachment_id','?')}): encoding failed")
+                continue
+            prompts.append(prefill)
             chunk_texts.append(chunk)
             prompt_map.append((i, ci))
 
