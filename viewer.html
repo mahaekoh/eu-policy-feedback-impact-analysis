@@ -400,6 +400,27 @@ body {
 .pub-docs, .pub-feedback-section { margin-top: 12px; }
 .pub-section-title { font-size: 12px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; margin-bottom: 8px; font-weight: 600; }
 
+/* Stance badges */
+.stance-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid #eee; }
+.stance-section h3 { font-size: 13px; text-transform: uppercase; color: #636e72; letter-spacing: .5px; margin-bottom: 10px; }
+.stance-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.stance-label { font-size: 12px; color: #636e72; min-width: 120px; }
+.stance-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+.stance-SUPPORT { background: #d4efdf; color: #1e8449; }
+.stance-OPPOSE { background: #fadbd8; color: #922b21; }
+.stance-NEUTRAL { background: #fdebd0; color: #af601a; }
+.stance-DOES_NOT_MENTION { background: #eaecee; color: #566573; }
+.stance-unknown { background: #f0f0f0; color: #888; }
+.stance-complex-block { margin-top: 8px; }
+.stance-complex-block .text-block { margin-top: 4px; }
+.fb-stance-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+
 /* User type colors */
 .ut-EU_CITIZEN { background: #d4efdf; color: #1e8449; }
 .ut-COMPANY { background: #d6eaf8; color: #1a5276; }
@@ -542,6 +563,78 @@ body {
 
   function utClass(ut) { return ut && USER_TYPE_LABELS[ut] ? ut : 'unknown'; }
 
+  // --- Stance helpers ---
+  function stanceBadgeClass(label) {
+    if (!label) return 'stance-unknown';
+    const normalized = label.toUpperCase().replace(/\s+/g, '_');
+    if (normalized === 'SUPPORT') return 'stance-SUPPORT';
+    if (normalized === 'OPPOSE') return 'stance-OPPOSE';
+    if (normalized === 'NEUTRAL') return 'stance-NEUTRAL';
+    if (normalized.includes('DOES') && normalized.includes('MENTION')) return 'stance-DOES_NOT_MENTION';
+    return 'stance-unknown';
+  }
+
+  function renderStanceBadge(value) {
+    if (value == null) return '';
+    if (Array.isArray(value)) {
+      return value.map(v => `<span class="stance-badge ${stanceBadgeClass(v)}">${esc(v || '?')}</span>`).join(' ');
+    }
+    return `<span class="stance-badge ${stanceBadgeClass(value)}">${esc(value || '?')}</span>`;
+  }
+
+  function renderStanceReasoning(value, textId, label) {
+    if (value == null) return '';
+    if (Array.isArray(value)) {
+      const combined = value.filter(Boolean).join('\n\n---\n\n');
+      if (!combined) return '';
+      return renderTextBlock(label || 'Reasoning', combined, textId, false, true);
+    }
+    if (!value) return '';
+    return renderTextBlock(label || 'Reasoning', value, textId, false, true);
+  }
+
+  function renderClassificationSection() {
+    const hasSimple = data.before_feedback_nuclear_stance != null || data.after_feedback_nuclear_stance != null;
+    const hasComplex = data.before_feedback_nuclear_stance_complex != null || data.after_feedback_nuclear_stance_complex != null;
+    if (!hasSimple && !hasComplex) return '';
+
+    let html = '<div class="stance-section"><h3>Nuclear Energy Stance Classification</h3>';
+
+    if (hasSimple) {
+      if (data.before_feedback_nuclear_stance != null) {
+        html += `<div class="stance-row">
+          <span class="stance-label">Before feedback:</span>
+          ${renderStanceBadge(data.before_feedback_nuclear_stance)}
+        </div>`;
+        html += renderStanceReasoning(data.before_feedback_nuclear_stance_reasoning, 'meta-before-reason', 'Before Feedback Reasoning');
+      }
+      if (data.after_feedback_nuclear_stance != null) {
+        html += `<div class="stance-row">
+          <span class="stance-label">After feedback:</span>
+          ${renderStanceBadge(data.after_feedback_nuclear_stance)}
+        </div>`;
+        html += renderStanceReasoning(data.after_feedback_nuclear_stance_reasoning, 'meta-after-reason', 'After Feedback Reasoning');
+      }
+    }
+
+    if (hasComplex) {
+      html += '<div class="stance-complex-block">';
+      html += '<div style="font-size:12px;font-weight:600;color:#636e72;margin:8px 0 4px">Complex Analysis</div>';
+      if (data.before_feedback_nuclear_stance_complex != null) {
+        html += renderStanceReasoning(data.before_feedback_nuclear_stance_complex, 'meta-before-complex', 'Before Feedback (Complex)');
+        html += renderStanceReasoning(data.before_feedback_nuclear_stance_complex_reasoning, 'meta-before-complex-reason', 'Before Feedback Complex Reasoning');
+      }
+      if (data.after_feedback_nuclear_stance_complex != null) {
+        html += renderStanceReasoning(data.after_feedback_nuclear_stance_complex, 'meta-after-complex', 'After Feedback (Complex)');
+        html += renderStanceReasoning(data.after_feedback_nuclear_stance_complex_reasoning, 'meta-after-complex-reason', 'After Feedback Complex Reasoning');
+      }
+      html += '</div>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
   // --- File loading ---
   document.getElementById('fileInput').addEventListener('change', function(e) {
     const file = e.target.files[0];
@@ -630,6 +723,7 @@ body {
           <h3>Initiative Summary</h3>
           <p>${esc(data.summary)}</p>
         </div>` : ''}
+      ${renderClassificationSection()}
     `;
   }
 
@@ -911,6 +1005,14 @@ body {
         ${fb.url ? '<a href="' + esc(fb.url) + '" target="_blank" rel="noopener" class="ext-link"><span class="icon">\u2197</span> View on EU Portal</a>' : ''}
       </div>
       <div class="fb-info">${infoParts.map(p => '<span>' + p + '</span>').join('')}</div>`;
+
+    if (fb.nuclear_stance != null) {
+      html += `<div class="fb-stance-row">
+        <span style="font-size:11px;color:#636e72">Nuclear stance:</span>
+        ${renderStanceBadge(fb.nuclear_stance)}
+      </div>`;
+      html += renderStanceReasoning(fb.nuclear_stance_reasoning, 'fb-reason-' + idx, 'Reasoning');
+    }
 
     if (fb.feedback_text) {
       if (fb.feedback_text.length > 500) {
