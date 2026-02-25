@@ -246,8 +246,21 @@ def download_and_extract(download_url: str, filename: str, label: str = "") -> s
     with urllib.request.urlopen(req, timeout=120) as resp:
         data = resp.read()
 
+    # If the bytes are actually a PDF, always extract as PDF regardless of extension
+    if ext != ".pdf" and data[:5] == b"%PDF-":
+        try:
+            text = _extract_pdf_from_bytes(data, label)
+            if len((text or "").strip()) >= OCR_MIN_CHARS:
+                elapsed = time.time() - t0
+                print(f"  PDF-reinterpret ({elapsed:.1f}s, {len(data)} bytes): {label}")
+                return text
+        except Exception:
+            pass  # PDF parsing failed, fall through to native
+
     # For non-PDF extensions that are often mislabeled PDFs, try PDF first
-    if ext in TRY_PDF_FIRST_EXTENSIONS:
+    # (catches cases where the file is a PDF but doesn't start with %PDF- header,
+    # e.g. leading whitespace or BOM)
+    if ext in TRY_PDF_FIRST_EXTENSIONS and data[:5] != b"%PDF-":
         try:
             text = _extract_pdf_from_bytes(data, label)
             if len((text or "").strip()) >= OCR_MIN_CHARS:
