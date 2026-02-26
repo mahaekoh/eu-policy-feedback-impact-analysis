@@ -26,6 +26,7 @@ import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
 import pymupdf
 import pymupdf4llm
@@ -40,6 +41,9 @@ FEEDBACK_PAGE_SIZE = 500
 INITIATIVE_WORKERS = 20
 FEEDBACK_WORKERS = 20
 PDF_WORKERS = 40
+
+# Publication document cache directory (set via --cache-dir)
+_doc_cache_dir: Optional[Path] = None
 
 # Map publication type codes to human-readable section labels
 PUBLICATION_TYPE_LABELS = {
@@ -129,6 +133,7 @@ def extract_english_documents(attachments: list, pub_type: str) -> list[dict]:
         if ext not in (".pdf", ".docx", ".doc", ".rtf", ".odt", ".txt", ".zip"):
             continue
         docs.append({
+            "doc_id": doc_id,
             "label": build_document_label(pub_type, att),
             "download_url": f"{DOWNLOAD_URL}/{doc_id}" if doc_id else "",
             "filename": filename,
@@ -149,6 +154,37 @@ EXTRACTABLE_EXTENSIONS = {".pdf", ".docx", ".doc", ".rtf", ".odt", ".txt"}
 # Extensions where we try PDF extraction first before the native pipeline
 # (many uploads are mislabeled PDFs)
 TRY_PDF_FIRST_EXTENSIONS = {".doc", ".docx", ".odt", ".rtf"}
+
+
+def _sanitize_filename(name: str) -> str:
+    """Replace non-alphanumeric/dot/dash/underscore chars with underscore."""
+    return re.sub(r"[^\w.\-]", "_", name)
+
+
+def _cache_path(init_id, pub_id, doc_id, filename: str) -> Optional[Path]:
+    """Return the cache file path, or None if caching is disabled."""
+    if _doc_cache_dir is None:
+        return None
+    safe_name = _sanitize_filename(filename)
+    return _doc_cache_dir / str(init_id) / f"pub{pub_id}_doc{doc_id}_{safe_name}"
+
+
+def _download_or_cache(download_url: str, init_id, pub_id, doc_id, filename: str, label: str = "") -> bytes:
+    """Download file bytes, using cache if available."""
+    path = _cache_path(init_id, pub_id, doc_id, filename)
+    if path is not None and path.exists():
+        print(f"  CACHE HIT: {label}")
+        return path.read_bytes()
+
+    req = urllib.request.Request(download_url)
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = resp.read()
+
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    return data
 
 
 def _extract_pdf_from_bytes(data: bytes, label: str = "") -> str:
@@ -232,28 +268,22 @@ def _extract_native_from_bytes(data: bytes, ext: str, label: str = "") -> str:
         raise ValueError(f"Unsupported extension: {ext}")
 
 
-def download_and_extract(download_url: str, filename: str, label: str = "") -> str:
-    """Download a file and extract text.
+def extract_from_bytes(data: bytes, filename: str, label: str = "") -> str:
+    """Extract text from already-downloaded file bytes.
 
     For .doc/.docx/.odt/.rtf files, tries PDF extraction first (many uploads
     are mislabeled PDFs), then falls back to the format-specific pipeline.
-    Downloads the file once and reuses the bytes for both attempts.
     """
     t0 = time.time()
     ext = Path(filename).suffix.lower()
-
-    req = urllib.request.Request(download_url)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = resp.read()
 
     # If the bytes are actually a PDF, always extract as PDF regardless of extension
     if ext != ".pdf" and data[:5] == b"%PDF-":
         try:
             text = _extract_pdf_from_bytes(data, label)
-            if len((text or "").strip()) >= OCR_MIN_CHARS:
-                elapsed = time.time() - t0
-                print(f"  PDF-reinterpret ({elapsed:.1f}s, {len(data)} bytes): {label}")
-                return text
+            elapsed = time.time() - t0
+            print(f"  PDF-reinterpret ({elapsed:.1f}s, {len(data)} bytes): {label}")
+            return text
         except Exception:
             pass  # PDF parsing failed, fall through to native
 
@@ -276,6 +306,19 @@ def download_and_extract(download_url: str, filename: str, label: str = "") -> s
     fmt = ext.lstrip(".").upper() or "FILE"
     print(f"  {fmt} extracted ({elapsed:.1f}s, {len(data)} bytes): {label}")
     return text
+
+
+def download_and_extract(download_url: str, filename: str, label: str = "") -> str:
+    """Download a file and extract text.
+
+    For .doc/.docx/.odt/.rtf files, tries PDF extraction first (many uploads
+    are mislabeled PDFs), then falls back to the format-specific pipeline.
+    Downloads the file once and reuses the bytes for both attempts.
+    """
+    req = urllib.request.Request(download_url)
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = resp.read()
+    return extract_from_bytes(data, filename, label)
 
 
 def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
@@ -378,13 +421,15 @@ def fetch_all_feedback(
     return all_feedback, error
 
 
-def _extract_text_for_doc(doc: dict, pub_id: int):
-    """Download and extract text for a single document. Mutates doc in place."""
+def _extract_text_for_doc(doc: dict, pub_id: int, init_id=None):
+    """Download and extract text for a single publication document. Mutates doc in place."""
     label = f"pub={pub_id} {doc['filename']}"
     try:
-        doc["extracted_text"] = download_and_extract(
-            doc["download_url"], doc["filename"], label=label,
+        data = _download_or_cache(
+            doc["download_url"], init_id, pub_id,
+            doc.get("doc_id", ""), doc["filename"], label=label,
         )
+        doc["extracted_text"] = extract_from_bytes(data, doc["filename"], label=label)
     except Exception as exc:
         doc["extracted_text_error"] = str(exc)
         print(f"  EXTRACT ERROR pub={pub_id} {doc['filename']}: {exc}")
@@ -392,7 +437,7 @@ def _extract_text_for_doc(doc: dict, pub_id: int):
 
 def extract_publications(
     pubs: list, initiative_url: str, fb_executor: ThreadPoolExecutor,
-    pdf_executor: ThreadPoolExecutor = None,
+    pdf_executor: ThreadPoolExecutor = None, init_id=None,
 ) -> list[dict]:
     sections = []
 
@@ -431,7 +476,7 @@ def extract_publications(
             ext = Path(doc["filename"]).suffix.lower()
             if ext in EXTRACTABLE_EXTENSIONS and doc["download_url"]:
                 pdf_futures.append(
-                    _pdf_pool.submit(_extract_text_for_doc, doc, pub_id)
+                    _pdf_pool.submit(_extract_text_for_doc, doc, pub_id, init_id)
                 )
 
         if total_feedback > 0 and pub_id:
@@ -477,12 +522,194 @@ def extract_initiative(
         "policy_areas": policy_areas,
         "published_date": data.get("publishedDate", ""),
         "publications": extract_publications(
-            data.get("publications", []), url, fb_executor, pdf_executor
+            data.get("publications", []), url, fb_executor, pdf_executor,
+            init_id=init_id,
         ),
     }
 
 
-def main(out_dir: str = None):
+def _retry_extraction_errors(out_path: Path):
+    """Scan existing initiative JSONs for extraction errors and retry them.
+
+    Looks for documents and feedback attachments that have extracted_text_error
+    but no extracted_text. Retries download_and_extract on each. On success,
+    sets extracted_text and removes extracted_text_error. Saves updated files.
+    """
+    # Collect all (file_path, initiative_data) with extraction errors
+    retry_items = []  # (file_path, initiative_data, error_locations)
+    for p in sorted(out_path.glob("*.json")):
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        if "error" in data:
+            continue  # top-level error, skip entirely
+
+        locations = []  # list of (description, obj_with_error, pub_id_or_None)
+        for pub in data.get("publications", []):
+            pub_id = pub.get("publication_id", "?")
+            for doc in pub.get("documents", []):
+                if "extracted_text_error" in doc and "extracted_text" not in doc:
+                    locations.append((
+                        f"pub={pub_id} doc={doc.get('filename', '?')}",
+                        doc,
+                        pub_id,
+                    ))
+            for fb in pub.get("feedback", []):
+                fb_id = fb.get("id", "?")
+                for att in fb.get("attachments", []):
+                    if "extracted_text_error" in att and "extracted_text" not in att:
+                        locations.append((
+                            f"fb={fb_id} att={att.get('filename', '?')}",
+                            att,
+                            None,
+                        ))
+        if locations:
+            retry_items.append((p, data, locations))
+
+    if not retry_items:
+        print("\nNo extraction errors to retry.")
+        return
+
+    total_errors = sum(len(locs) for _, _, locs in retry_items)
+    print(f"\nRetrying {total_errors} extraction errors across {len(retry_items)} files...")
+
+    fixed_total = 0
+    failed_total = 0
+
+    def _retry_one(desc, obj, init_id, pub_id):
+        """Retry extraction for a single document/attachment. Mutates obj."""
+        filename = obj.get("filename", "")
+        download_url = obj.get("download_url", "")
+        if not download_url or not filename:
+            return False
+        ext = Path(filename).suffix.lower()
+        if ext not in EXTRACTABLE_EXTENSIONS:
+            return False
+        label = f"retry init={init_id} {desc}"
+        try:
+            if pub_id is not None and "doc_id" in obj:
+                data = _download_or_cache(
+                    download_url, init_id, pub_id,
+                    obj.get("doc_id", ""), filename, label=label,
+                )
+                text = extract_from_bytes(data, filename, label=label)
+            else:
+                text = download_and_extract(download_url, filename, label=label)
+            obj["extracted_text"] = text
+            old_error = obj.pop("extracted_text_error", None)
+            obj["retry_old_error"] = old_error
+            return True
+        except Exception as exc:
+            obj["extracted_text_error"] = str(exc)
+            print(f"  RETRY FAILED {label}: {exc}")
+            return False
+
+    with ThreadPoolExecutor(max_workers=PDF_WORKERS) as pool:
+        for file_path, data, locations in retry_items:
+            init_id = data.get("id", file_path.stem)
+            futures = []
+            for desc, obj, pub_id in locations:
+                futures.append(pool.submit(_retry_one, desc, obj, init_id, pub_id))
+
+            fixed = sum(1 for fut in futures if fut.result())
+            failed = len(futures) - fixed
+            fixed_total += fixed
+            failed_total += failed
+
+            if fixed > 0:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print(f"  init={init_id}: {fixed} fixed, {failed} still failing — saved")
+            elif failed > 0:
+                print(f"  init={init_id}: {failed} still failing")
+
+    print(f"Retry complete: {fixed_total} fixed, {failed_total} still failing")
+
+
+def _fix_pdf_as_text(out_path: Path):
+    """Fix feedback attachments where extracted_text contains raw PDF data.
+
+    Some attachments (e.g. .txt extension) are actually PDFs. If the original
+    extraction decoded raw PDF bytes as UTF-8 text, the extracted_text starts
+    with '%PDF'. Re-downloads and extracts as PDF.
+    """
+    fix_items = []  # (file_path, initiative_data, locations)
+    for p in sorted(out_path.glob("*.json")):
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        if "error" in data:
+            continue
+
+        locations = []  # (description, att_dict)
+        for pub in data.get("publications", []):
+            for fb in pub.get("feedback", []):
+                fb_id = fb.get("id", "?")
+                for att in fb.get("attachments", []):
+                    text = att.get("extracted_text", "")
+                    if text.startswith("%PDF"):
+                        locations.append((
+                            f"fb={fb_id} att={att.get('filename', '?')}",
+                            att,
+                        ))
+        if locations:
+            fix_items.append((p, data, locations))
+
+    if not fix_items:
+        print("\nNo PDF-as-text feedback attachments to fix.")
+        return
+
+    total = sum(len(locs) for _, _, locs in fix_items)
+    print(f"\nFixing {total} feedback attachments with PDF-as-text across {len(fix_items)} files...")
+
+    fixed_total = 0
+    failed_total = 0
+
+    def _fix_one(desc, att, init_id):
+        download_url = att.get("download_url", "")
+        if not download_url:
+            return False
+        label = f"pdf-as-text init={init_id} {desc}"
+        try:
+            req = urllib.request.Request(download_url)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+            text = _extract_pdf_from_bytes(raw, label)
+            att["extracted_text_before_pdf_fix"] = att["extracted_text"]
+            att["extracted_text"] = text
+            print(f"  FIXED: {label}")
+            return True
+        except Exception as exc:
+            print(f"  FIX FAILED {label}: {exc}")
+            return False
+
+    with ThreadPoolExecutor(max_workers=PDF_WORKERS) as pool:
+        for file_path, data, locations in fix_items:
+            init_id = data.get("id", file_path.stem)
+            futures = []
+            for desc, att in locations:
+                futures.append(pool.submit(_fix_one, desc, att, init_id))
+
+            fixed = sum(1 for fut in futures if fut.result())
+            failed = len(futures) - fixed
+            fixed_total += fixed
+            failed_total += failed
+
+            if fixed > 0:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print(f"  init={init_id}: {fixed} fixed, {failed} failed — saved")
+            elif failed > 0:
+                print(f"  init={init_id}: {failed} could not fix")
+
+    print(f"PDF-as-text fix complete: {fixed_total} fixed, {failed_total} failed")
+
+
+def main(out_dir: str = None, cache_dir: str = None):
+    global _doc_cache_dir
+    if cache_dir:
+        _doc_cache_dir = Path(cache_dir)
+        _doc_cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Document cache: {_doc_cache_dir}")
+
     csv_path = Path(__file__).parent.parent / "eu_initiatives.csv"
 
     with open(csv_path, encoding="utf-8") as f:
@@ -569,6 +796,12 @@ def main(out_dir: str = None):
         fb_executor.shutdown(wait=False)
         pdf_executor.shutdown(wait=False)
 
+    # --- Retry extraction errors in existing files ---
+    _retry_extraction_errors(out_path)
+
+    # --- Fix feedback attachments where extracted_text is raw PDF bytes ---
+    _fix_pdf_as_text(out_path)
+
     # Summary
     total_written = len(list(out_path.glob("*.json")))
     errors = 0
@@ -579,8 +812,14 @@ def main(out_dir: str = None):
     print(f"\nDone. {total_written} initiatives saved to {out_path} ({errors} errors)")
 
 
-def scrape_one(init_id: int):
+def scrape_one(init_id: int, cache_dir: str = None):
     """Scrape a single initiative by ID and print the result as JSON."""
+    global _doc_cache_dir
+    if cache_dir:
+        _doc_cache_dir = Path(cache_dir)
+        _doc_cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Document cache: {_doc_cache_dir}")
+
     fb_executor = ThreadPoolExecutor(max_workers=FEEDBACK_WORKERS)
     pdf_executor = ThreadPoolExecutor(max_workers=PDF_WORKERS)
     try:
@@ -616,9 +855,14 @@ if __name__ == "__main__":
         help="Output directory for per-initiative JSON files. "
              "Defaults to initiative_details/.",
     )
+    parser.add_argument(
+        "-c", "--cache-dir", type=str, default=None,
+        help="Directory to cache downloaded publication document files. "
+             "When set, raw files are saved and reused on subsequent runs.",
+    )
     args = parser.parse_args()
 
     if args.initiative_id is not None:
-        scrape_one(args.initiative_id)
+        scrape_one(args.initiative_id, cache_dir=args.cache_dir)
     else:
-        main(out_dir=args.out_dir)
+        main(out_dir=args.out_dir, cache_dir=args.cache_dir)
