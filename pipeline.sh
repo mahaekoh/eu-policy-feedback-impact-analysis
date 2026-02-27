@@ -222,7 +222,7 @@ do_cluster() {
 do_deploy() {
     stage_start "deploy code to remote"
     $SSH_CMD "mkdir -p ${REMOTE_DIR}/src"
-    rsync -avz \
+    rsync -avz --exclude='__pycache__' \
         -e "ssh -i ${SSH_KEY}" \
         "${SCRIPT_DIR}/src/" "${REMOTE_HOST}:${REMOTE_DIR}/src/"
     stage_end "deploy code to remote"

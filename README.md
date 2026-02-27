@@ -12,7 +12,7 @@ This project collects the full documentary record needed to investigate that que
 
 The analysis follows a documentary comparison approach:
 
-1. **Collect** all EU "Have Your Say" initiatives with feedback periods between December 2019 and November 2024 (1,825 initiatives)
+1. **Collect** all EU "Have Your Say" initiatives (3,949 initiatives)
 2. **Extract** the full text of every published document and every feedback attachment (PDFs, Word documents, RTF, ODT, plain text), with automatic retries for mislabeled file formats
 3. **Recover** text from scanned or image-based PDFs using optical character recognition (OCR)
 4. **Translate** non-English feedback attachments to English using a large language model
@@ -20,7 +20,7 @@ The analysis follows a documentary comparison approach:
 6. **Summarize** long documents and feedback attachments using AI to enable qualitative comparison at scale
 7. **Unify** per-initiative summaries into consolidated before/after/feedback summary fields for downstream analysis
 
-A subset of 145 initiatives was selected for detailed before/after analysis. All initiatives with feedback are included, even when no documents were published after the feedback period.
+All 2,970 initiatives with feedback are included in the before/after analysis, even when no documents were published after the feedback period.
 
 ## Data Source
 
@@ -34,11 +34,11 @@ All data comes from the European Commission's [Better Regulation](https://ec.eur
 
 ### Master initiative list (`data/scrape/eu_initiatives.csv`)
 
-A CSV file with all 1,825 initiatives, including their ID, title, type of act, feedback dates, policy topics, and URL.
+A CSV file with all 3,949 initiatives, including their ID, title, type of act, feedback dates, policy topics, and URL.
 
 ### Per-initiative detail files (`data/scrape/initiative_details/*.json`)
 
-One JSON file per initiative (1,785 files) containing the complete record: all publications with their documents (full extracted text), all feedback items with their metadata (date, language, respondent type, country, organization) and attached files (full extracted text, translated to English where needed).
+One JSON file per initiative (3,898 files) containing the complete record: all publications with their documents (full extracted text), all feedback items with their metadata (date, language, respondent type, country, organization) and attached files (full extracted text, translated to English where needed).
 
 ### Before/after analysis files (`data/analysis/before_after/*.json`)
 
@@ -131,19 +131,19 @@ Feedback comes from a range of respondent types as classified by the EU portal:
 
 | Metric | Count |
 |--------|-------|
-| Total initiatives scraped | 1,825 |
-| Initiatives with full detail data | 1,785 |
-| Initiatives selected for analysis | 145 |
-| Initiatives with no Commission response after feedback | 19 |
+| Total initiatives scraped | 3,949 |
+| Initiatives with full detail data | 3,898 |
+| Initiatives with feedback (included in analysis) | 2,970 |
+| Initiatives with no Commission response after feedback | 901 |
 
 ## Scope and Limitations
 
-- **Sampling**: 145 of 1,825 initiatives were selected for the before/after analysis (~8%). The selection criteria and rationale should be documented separately for any publication.
+- **Coverage**: 2,970 of 3,949 initiatives have feedback and are included in the before/after analysis (~75%). The remaining initiatives have no public feedback on the portal.
 - **Correlation, not causation**: Finding that a document changed after feedback does not prove the feedback caused the change. The Commission may have planned revisions independently.
 - **Text extraction quality**: Most PDFs extract cleanly, but some scanned documents required OCR, which can introduce errors. Original text is preserved alongside OCR results for verification.
 - **Translation quality**: Non-English feedback was translated by a large language model. Translations are generally accurate but may miss nuance. Original text is preserved alongside translations.
 - **Feedback text vs. attachments**: Some respondents submit detailed positions as attached documents rather than in the free-text comment field. The pipeline captures both, but analysis should account for this variation.
-- **Time period**: Feedback periods from December 2019 to November 2024.
+- **Time period**: Initiatives published from June 2016 to February 2026.
 
 ## Working with the Data
 
