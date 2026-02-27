@@ -1127,10 +1127,14 @@ body {
     html += '<span class="cluster-toggle" id="toggle-' + clId + '">\u25B6</span>';
     html += '<div class="cluster-header-content">';
     html += '<div class="cluster-top-row">';
-    html += '<span class="cluster-id-label">#' + node.label + '</span>';
+    var displayLabel = node.label === '-1' ? 'Unclustered' : '#' + node.label;
+    html += '<span class="cluster-id-label">' + displayLabel + '</span>';
     html += '<span class="cluster-size-badge">' + items.length + '</span>';
     if (hasChildren) {
       html += '<span class="sub-count">' + node.children.length + ' sub-clusters</span>';
+    }
+    if (node.directItems.length > 0 && hasChildren) {
+      html += '<span class="sub-count">' + node.directItems.length + ' unclustered</span>';
     }
     html += renderCountryBar(stats.sortedCountries, total);
     html += renderUserTypeBar(stats.sortedTypes, total);
@@ -1147,6 +1151,10 @@ body {
     html += renderClusterDetailStats(items, stats.sortedCountries, stats.sortedTypes, total);
 
     if (hasChildren) {
+      // Show unclustered direct items first (noise absorbed at sub-level)
+      if (node.directItems.length > 0) {
+        html += renderNoiseSection(node.directItems, clId + '-noise');
+      }
       // Render sub-clusters as nested threads, largest first
       var sortedChildren = node.children.slice().sort(function(a, b) { return b.allItems.length - a.allItems.length; });
       sortedChildren.forEach(function(child, si) {
@@ -1193,10 +1201,14 @@ body {
     html += '<span class="cluster-toggle" id="toggle-' + scId + '">\u25B6</span>';
     html += '<div class="cluster-header-content">';
     html += '<div class="cluster-top-row">';
-    html += '<span class="cluster-id-label">#' + node.label + '</span>';
+    var displayLabel = node.label === '-1' ? 'Unclustered' : '#' + node.label;
+    html += '<span class="cluster-id-label">' + displayLabel + '</span>';
     html += '<span class="cluster-size-badge">' + items.length + '</span>';
     if (hasChildren) {
       html += '<span class="sub-count">' + node.children.length + ' sub</span>';
+    }
+    if (node.directItems.length > 0 && hasChildren) {
+      html += '<span class="sub-count">' + node.directItems.length + ' unclustered</span>';
     }
     html += renderCountryBar(stats.sortedCountries, total);
     html += renderUserTypeBar(stats.sortedTypes, total);
@@ -1212,6 +1224,10 @@ body {
     html += renderClusterDetailStats(items, stats.sortedCountries, stats.sortedTypes, total);
 
     if (hasChildren) {
+      // Show unclustered direct items first (noise absorbed at sub-level)
+      if (node.directItems.length > 0) {
+        html += renderNoiseSection(node.directItems, scId + '-noise');
+      }
       var sortedChildren = node.children.slice().sort(function(a, b) { return b.allItems.length - a.allItems.length; });
       sortedChildren.forEach(function(child, si) {
         html += renderSubCluster(child, scId + '-s' + si);
@@ -1232,6 +1248,33 @@ body {
 
     html += '</div>'; // cluster-body
     html += '</div>'; // sub-cluster
+    return html;
+  }
+
+  // --- Render noise/unclustered items within a parent cluster ---
+  function renderNoiseSection(noiseItems, noiseId) {
+    var INITIAL_SHOW = 3;
+    var html = '<div class="sub-cluster" style="border-left-color:#e15759">';
+    html += '<div class="cluster-header" onclick="toggleCluster(\'' + noiseId + '\')">';
+    html += '<span class="cluster-toggle" id="toggle-' + noiseId + '">\u25B6</span>';
+    html += '<div class="cluster-header-content">';
+    html += '<div class="cluster-top-row">';
+    html += '<span class="cluster-id-label" style="color:#e15759">Unclustered</span>';
+    html += '<span class="cluster-size-badge">' + noiseItems.length + '</span>';
+    html += '</div>';
+    html += '</div></div>';
+    html += '<div class="cluster-body" id="body-' + noiseId + '">';
+    nodeStore[noiseId] = { label: 'noise', directItems: noiseItems, children: [], allItems: noiseItems };
+    var showCount = Math.min(INITIAL_SHOW, noiseItems.length);
+    for (var j = 0; j < showCount; j++) {
+      html += renderReply(noiseItems[j], noiseId + '-' + j);
+    }
+    if (noiseItems.length > INITIAL_SHOW) {
+      html += '<button class="show-all-btn" id="more-' + noiseId
+        + '" onclick="showAllReplies(\'' + noiseId + '\')">Show all '
+        + noiseItems.length + ' items (' + (noiseItems.length - INITIAL_SHOW) + ' more)</button>';
+    }
+    html += '</div></div>';
     return html;
   }
 
