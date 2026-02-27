@@ -1,0 +1,12 @@
+# Pipeline configuration — copy to pipeline.conf and fill in your values.
+# pipeline.conf is gitignored.
+
+REMOTE_HOST="user@gpu-host"
+REMOTE_DIR="/home/user/eu-pipeline"
+SSH_KEY="~/.ssh/id_ed25519"
+PYTHON="python3"
+
+# Clustering schemes (space-separated scheme directory names).
+# Each scheme name encodes the algorithm and parameters; pipeline.sh parses
+# them to construct cluster_all_initiatives.py CLI flags.
+CLUSTER_SCHEMES="agglomerative_google_embeddinggemma-300m_distance_threshold=0.75_linkage=average_max_cluster_size=20_max_depth=3_sub_cluster_scale=0.75 hdbscan_google_embeddinggemma-300m_min_cluster_size=5_min_samples=3_max_cluster_size=20_max_depth=4"

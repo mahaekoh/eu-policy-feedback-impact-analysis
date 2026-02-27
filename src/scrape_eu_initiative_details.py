@@ -710,13 +710,13 @@ def main(out_dir: str = None, cache_dir: str = None):
         _doc_cache_dir.mkdir(parents=True, exist_ok=True)
         print(f"Document cache: {_doc_cache_dir}")
 
-    csv_path = Path(__file__).parent.parent / "eu_initiatives.csv"
+    csv_path = Path(__file__).parent.parent / "data" / "scrape" / "eu_initiatives.csv"
 
     with open(csv_path, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     print(f"Loaded {len(rows)} initiatives from {csv_path.name}")
 
-    out_path = Path(out_dir) if out_dir else Path(__file__).parent.parent / "initiative_details"
+    out_path = Path(out_dir) if out_dir else Path(__file__).parent.parent / "data" / "scrape" / "initiative_details"
     out_path.mkdir(parents=True, exist_ok=True)
     # Resume: check which IDs already have files
     done_ids = set()

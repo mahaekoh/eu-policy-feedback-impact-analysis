@@ -7,18 +7,18 @@ https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives_en
 API endpoint:
 https://ec.europa.eu/info/law/better-regulation/brpapi/searchInitiatives
 
-Caches raw API page responses to a directory for resume/offline use.
+Fetches all pages in parallel (10 workers).
 Produces eu_initiatives.csv and eu_initiatives_raw.json.
 """
 
 import argparse
 import csv
 import json
-import os
 import re
 import time
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 API_URL = (
@@ -26,6 +26,7 @@ API_URL = (
     "?language=EN"
 )
 PAGE_SIZE = 10
+PAGE_WORKERS = 10
 BASE_INITIATIVE_URL = (
     "https://ec.europa.eu/info/law/better-regulation"
     "/have-your-say/initiatives"
@@ -105,57 +106,46 @@ def main():
         description="Scrape all EU 'Have Your Say' initiatives."
     )
     parser.add_argument(
-        "--cache-dir", type=str, default=None,
-        help="Directory to cache raw API page responses (default: eu_initiatives_cache/).",
-    )
-    parser.add_argument(
         "-o", "--output", type=str, default=None,
         help="Output CSV path (default: eu_initiatives.csv).",
     )
     args = parser.parse_args()
 
     base_dir = Path(__file__).parent.parent
-    out_csv = Path(args.output) if args.output else base_dir / "eu_initiatives.csv"
+    out_csv = Path(args.output) if args.output else base_dir / "data" / "scrape" / "eu_initiatives.csv"
     out_json = out_csv.with_suffix(".json").with_name(
         out_csv.stem + "_raw.json"
     )
-    cache_dir = Path(args.cache_dir) if args.cache_dir else base_dir / "eu_initiatives_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    # Fetch first page to get total count (or load from cache)
-    page0_cache = cache_dir / "page_0000.json"
-    if page0_cache.is_file():
-        print("Loading page 1 from cache...")
-        with open(page0_cache, encoding="utf-8") as f:
-            first_response = json.load(f)
-    else:
-        print("Fetching page 1 ...")
-        first_response = fetch_page(0)
-        with open(page0_cache, "w", encoding="utf-8") as f:
-            json.dump(first_response, f, ensure_ascii=False, indent=2)
+    # Fetch first page to get total count
+    print("Fetching page 1 ...")
+    first_response = fetch_page(0)
 
     first = first_response["initiativeResultDtoPage"]
     total_pages = first["totalPages"]
     total_elements = first["totalElements"]
     print(f"Total initiatives: {total_elements}  |  Pages: {total_pages}")
 
-    # Collect all raw initiative items from all pages
+    # Collect all raw initiative items from all pages (parallel fetch)
     all_raw_items = list(first.get("content", []))
+    page_results = {}  # page number -> response dict
 
+    def fetch_one(page: int) -> tuple[int, dict]:
+        print(f"Fetching page {page + 1}/{total_pages} ...")
+        return page, fetch_page(page)
+
+    with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
+        futures = [pool.submit(fetch_one, p) for p in range(1, total_pages)]
+        for future in as_completed(futures):
+            page, response = future.result()
+            page_results[page] = response
+
+    # Reassemble in page order
     for page in range(1, total_pages):
-        page_cache = cache_dir / f"page_{page:04d}.json"
-        if page_cache.is_file():
-            with open(page_cache, encoding="utf-8") as f:
-                response = json.load(f)
-            print(f"Loaded page {page + 1}/{total_pages} from cache ({len(response['initiativeResultDtoPage'].get('content', []))} items)")
-        else:
-            print(f"Fetching page {page + 1}/{total_pages} ...")
-            response = fetch_page(page)
-            with open(page_cache, "w", encoding="utf-8") as f:
-                json.dump(response, f, ensure_ascii=False, indent=2)
-            time.sleep(0.3)  # be polite
-
-        all_raw_items.extend(response["initiativeResultDtoPage"].get("content", []))
+        all_raw_items.extend(
+            page_results[page]["initiativeResultDtoPage"].get("content", [])
+        )
 
     print(f"\nCollected {len(all_raw_items)} initiatives")
 
@@ -177,7 +167,6 @@ def main():
         writer.writerows(csv_records)
 
     print(f"CSV: {out_csv}")
-    print(f"Cache: {cache_dir}/ ({total_pages} page files)")
 
 
 if __name__ == "__main__":

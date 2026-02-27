@@ -2,47 +2,98 @@
 
 This project scrapes, processes, and enriches EU Better Regulation "Have Your Say" initiative data.
 
+## Data directory structure
+
+All data lives under `data/`:
+
+```
+data/
+  scrape/                          # Scraped raw data (source of truth)
+    eu_initiatives.csv
+    eu_initiatives_raw.json
+    eu_initiatives_cache/
+    initiative_details/            # Per-initiative JSONs (mutated by merges)
+    doc_cache/
+  repair/                          # Repair pipeline output
+    repaired_details/
+    repair_report.json
+  ocr/                             # OCR pipeline I/O
+    short_pdf_report.json
+    pdfs/
+    short_pdf_report_ocr.json
+  translation/                     # Translation pipeline I/O
+    non_english_attachments.json
+    non_english_attachments_translated.json
+    translation_batches/
+  analysis/                        # Analysis & summarization output
+    before_after/                  # initiative_stats output
+    summaries/                     # summarize_documents output
+    unit_summaries/                # build_unit_summaries output
+  clustering/                      # Clustering output (per-scheme subdirs)
+  classification/                  # Classification output
+  cluster_summaries/               # Cluster summary output (per-scheme subdirs)
+config/
+  initiative-whitelist-145.txt
+  init-no-response-blacklist-19.txt
+```
+
 ## Data flow
 
 ```
-scrape_eu_initiatives.py          → eu_initiatives.csv + eu_initiatives_raw.json + eu_initiatives_cache/
-scrape_eu_initiative_details.py   → initiative_details/*.json  (per-initiative JSON, with text extraction)
-find_short_pdf_extractions.py     → {out_dir}/short_pdf_report.json + {out_dir}/pdfs/
-ocr_short_pdfs.py                 → {input_dir}/short_pdf_report_ocr.json
-merge_ocr_results.py              → updates initiative_details/*.json in-place
-find_non_english_feedback_attachments.py → non_english_attachments.json
-translate_attachments.py          → non_english_attachments_translated.json
-merge_translations.py             → updates initiative_details/*.json in-place
-initiative_stats.py               → analysis + before_after_output/*.json (with -o)
-summarize_documents.py            → summaries_output/*.json (with summary fields added)
-build_unit_summaries.py           → unit_summaries/*.json (unified per-initiative summaries)
+scrape_eu_initiatives.py          → data/scrape/eu_initiatives.csv + eu_initiatives_raw.json + eu_initiatives_cache/
+scrape_eu_initiative_details.py   → data/scrape/initiative_details/*.json
+find_short_pdf_extractions.py     → data/ocr/short_pdf_report.json + data/ocr/pdfs/
+ocr_short_pdfs.py                 → data/ocr/short_pdf_report_ocr.json
+merge_ocr_results.py              → updates data/scrape/initiative_details/*.json in-place
+find_non_english_feedback_attachments.py → data/translation/non_english_attachments.json
+translate_attachments.py          → data/translation/non_english_attachments_translated.json
+merge_translations.py             → updates data/scrape/initiative_details/*.json in-place
+initiative_stats.py               → data/analysis/before_after/*.json
+summarize_documents.py            → data/analysis/summaries/*.json
+build_unit_summaries.py           → data/analysis/unit_summaries/*.json
+cluster_all_initiatives.py        → data/clustering/<scheme>/*.json
+classify_initiative_and_feedback.py → data/classification/*.json
+summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
 ```
 
 ### Repair pipeline (re-extracts broken attachments, then re-runs OCR + translation)
 
 ```
-repair_broken_attachments.py      → repaired_details/*.json + repaired_details/repair_report.json
-find_short_pdf_extractions.py -r  → {out_dir}/short_pdf_report.json + {out_dir}/pdfs/  (scoped to repaired attachments)
-ocr_short_pdfs.py                 → {input_dir}/short_pdf_report_ocr.json
-merge_ocr_results.py              → updates repaired_details/*.json in-place
-find_non_english_feedback_attachments.py -r → non_english_attachments.json  (scoped to repaired attachments)
-translate_attachments.py          → non_english_attachments_translated.json
-merge_translations.py             → updates repaired_details/*.json in-place
+repair_broken_attachments.py      → data/repair/repaired_details/*.json + data/repair/repair_report.json
+find_short_pdf_extractions.py -r  → data/ocr/  (scoped to repaired attachments)
+ocr_short_pdfs.py                 → data/ocr/short_pdf_report_ocr.json
+merge_ocr_results.py              → updates data/repair/repaired_details/*.json in-place
+find_non_english_feedback_attachments.py -r → data/translation/non_english_attachments.json  (scoped to repaired)
+translate_attachments.py          → data/translation/non_english_attachments_translated.json
+merge_translations.py             → updates data/repair/repaired_details/*.json in-place
 ```
 
-**Important:** When using `-r repair_report.json` with `find_non_english_feedback_attachments.py` or `find_short_pdf_extractions.py`, point the source at the *repaired* output directory (not the original `initiative_details/`), since the repaired JSONs are the ones with the newly extracted text.
+**Important:** When using `-r repair_report.json` with `find_non_english_feedback_attachments.py` or `find_short_pdf_extractions.py`, point the source at the *repaired* output directory (not the original `data/scrape/initiative_details/`), since the repaired JSONs are the ones with the newly extracted text.
+
+## Pipeline orchestration
+
+`pipeline.sh` orchestrates the full pipeline. Copy `pipeline.conf.example` to `pipeline.conf` and fill in remote host details.
+
+```
+./pipeline.sh list                     # show all stages
+./pipeline.sh <stage> [extra-args...]  # run a single stage
+./pipeline.sh all                      # full pipeline
+./pipeline.sh deploy                   # rsync code to remote
+./pipeline.sh remote summarize         # run summarize on remote GPU
+./pipeline.sh pull summaries           # rsync results back
+```
 
 ## Scripts
 
 ### Scraping
 
-**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Caches raw API page responses to `eu_initiatives_cache/` for resume and offline use. Outputs `eu_initiatives.csv` (flat extracted fields) and `eu_initiatives_raw.json` (full API data for each initiative). Supports `--cache-dir` and `-o` for custom paths.
+**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Caches raw API page responses to `data/scrape/eu_initiatives_cache/` for resume and offline use. Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `--cache-dir` and `-o` for custom paths.
 
-**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `initiative_details/`. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments.
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments.
 
 ### Analysis / reporting
 
-**`src/find_missing_initiatives.py`** — Reports initiative IDs present in the CSV but missing from `initiative_details/`, or with incomplete feedback data.
+**`src/find_missing_initiatives.py`** — Reports initiative IDs present in the CSV but missing from `data/scrape/initiative_details/`, or with incomplete feedback data.
 
 **`src/find_initiative_by_pub.py`** — Lookup utility: finds which initiative contains a given publication ID.
 
@@ -74,7 +125,7 @@ merge_translations.py             → updates repaired_details/*.json in-place
 
 ### Repair pipeline
 
-**`src/repair_broken_attachments.py`** — Scans `initiative_details/` for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the format-specific pipeline. Writes updated initiative JSON copies to a specified output directory (only files with at least one successful repair). Also writes `repair_report.json` — a machine-readable list of all repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, which can be passed as `-r` to downstream scripts to scope them to just the repaired attachments. Supports `-f` for initiative ID whitelist filter, `-w` for worker count (default 20), `--dry-run` for scanning without repairing. Adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments for traceability.
+**`src/repair_broken_attachments.py`** — Scans `data/scrape/initiative_details/` for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the format-specific pipeline. Writes updated initiative JSON copies to a specified output directory (only files with at least one successful repair). Also writes `repair_report.json` — a machine-readable list of all repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, which can be passed as `-r` to downstream scripts to scope them to just the repaired attachments. Supports `-f` for initiative ID whitelist filter, `-w` for worker count (default 20), `--dry-run` for scanning without repairing. Adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments for traceability.
 
 ### Viewer
 
@@ -84,7 +135,7 @@ merge_translations.py             → updates repaired_details/*.json in-place
 
 **`src/text_utils.py`** — Shared library. Contains `split_into_chunks(text, max_chars)` which splits text at sentence boundaries with a fallback to newline splits.
 
-**`src/print_chunk.py`** — Debug utility to print a specific chunk of a feedback attachment. Takes a spec like `"init=12096 fb=503089 att=6276475 chunk=5/15"` and the `initiative_details/` directory.
+**`src/print_chunk.py`** — Debug utility to print a specific chunk of a feedback attachment. Takes a spec like `"init=12096 fb=503089 att=6276475 chunk=5/15"` and the `data/scrape/initiative_details/` directory.
 
 ## Key dependencies
 

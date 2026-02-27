@@ -1,0 +1,17 @@
+# Data (large, generated)
+data/
+
+# User-specific pipeline config
+pipeline.conf
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+
+# OS / IDE
+.DS_Store
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/

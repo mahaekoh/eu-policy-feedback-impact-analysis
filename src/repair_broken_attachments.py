@@ -224,8 +224,8 @@ def main():
         description="Repair broken feedback attachments by retrying text extraction."
     )
     parser.add_argument(
-        "-i", "--input-dir", type=str, default="initiative_details",
-        help="Input directory with per-initiative JSON files (default: initiative_details/).",
+        "-i", "--input-dir", type=str, default="data/scrape/initiative_details",
+        help="Input directory with per-initiative JSON files (default: data/scrape/initiative_details/).",
     )
     parser.add_argument(
         "-o", "--output-dir", type=str, required=True,
