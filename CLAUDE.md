@@ -5,10 +5,10 @@ This project scrapes, processes, and enriches EU Better Regulation "Have Your Sa
 ## Data flow
 
 ```
-scrape_eu_initiatives.py          → eu_initiatives.csv
+scrape_eu_initiatives.py          → eu_initiatives.csv + eu_initiatives_raw.json + eu_initiatives_cache/
 scrape_eu_initiative_details.py   → initiative_details/*.json  (per-initiative JSON, with text extraction)
-find_short_pdf_extractions.py     → short_pdf_report.json + short_pdfs/
-ocr_short_pdfs.py                 → short_pdf_report_ocr.json
+find_short_pdf_extractions.py     → {out_dir}/short_pdf_report.json + {out_dir}/pdfs/
+ocr_short_pdfs.py                 → {input_dir}/short_pdf_report_ocr.json
 merge_ocr_results.py              → updates initiative_details/*.json in-place
 find_non_english_feedback_attachments.py → non_english_attachments.json
 translate_attachments.py          → non_english_attachments_translated.json
@@ -22,8 +22,8 @@ build_unit_summaries.py           → unit_summaries/*.json (unified per-initiat
 
 ```
 repair_broken_attachments.py      → repaired_details/*.json + repaired_details/repair_report.json
-find_short_pdf_extractions.py -r  → short_pdf_report.json + short_pdfs/  (scoped to repaired attachments)
-ocr_short_pdfs.py                 → short_pdf_report_ocr.json
+find_short_pdf_extractions.py -r  → {out_dir}/short_pdf_report.json + {out_dir}/pdfs/  (scoped to repaired attachments)
+ocr_short_pdfs.py                 → {input_dir}/short_pdf_report_ocr.json
 merge_ocr_results.py              → updates repaired_details/*.json in-place
 find_non_english_feedback_attachments.py -r → non_english_attachments.json  (scoped to repaired attachments)
 translate_attachments.py          → non_english_attachments_translated.json
@@ -36,9 +36,9 @@ merge_translations.py             → updates repaired_details/*.json in-place
 
 ### Scraping
 
-**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API. Outputs `eu_initiatives.csv`.
+**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Caches raw API page responses to `eu_initiatives_cache/` for resume and offline use. Outputs `eu_initiatives.csv` (flat extracted fields) and `eu_initiatives_raw.json` (full API data for each initiative). Supports `--cache-dir` and `-o` for custom paths.
 
-**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `initiative_details/`.
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `initiative_details/`. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments.
 
 ### Analysis / reporting
 
@@ -50,11 +50,11 @@ merge_translations.py             → updates repaired_details/*.json in-place
 
 **`src/find_non_english_feedback_attachments.py`** — Finds feedback attachments where the feedback language is not English. Supports `-o` for JSON output with full metadata, `-f` for initiative ID whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
 
-**`src/find_short_pdf_extractions.py`** — Finds attachments where `extracted_text` is suspiciously short (<100 chars). Checks all attachment types regardless of file extension (since many non-PDF extensions are actually PDFs). Downloads files in parallel (20 workers). Supports `-p` for PDF output directory, `-o` for JSON report, `-f` for whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
+**`src/find_short_pdf_extractions.py`** — Finds attachments where `extracted_text` is suspiciously short (<100 chars). Checks all attachment types regardless of file extension (since many non-PDF extensions are actually PDFs). Downloads files in parallel (20 workers). Supports `-o` for output directory (writes `{out_dir}/short_pdf_report.json` and downloads PDFs to `{out_dir}/pdfs/`), `-f` for whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
 
 ### OCR pipeline
 
-**`src/ocr_short_pdfs.py`** — GPU-accelerated OCR using EasyOCR with CUDA. Renders PDF pages to 300 DPI images via pymupdf, runs OCR, writes results to JSON. Designed for H100.
+**`src/ocr_short_pdfs.py`** — GPU-accelerated OCR using EasyOCR with CUDA. Takes the output directory from `find_short_pdf_extractions.py` (reads `short_pdf_report.json` and `pdfs/` from it). Renders PDF pages to 300 DPI images via pymupdf, runs OCR, writes results to `{input_dir}/short_pdf_report_ocr.json` (override with `-o`). Designed for H100.
 
 **`src/merge_ocr_results.py`** — Merges OCR results back into initiative JSON files. Replaces `extracted_text`, preserves original as `extracted_text_without_ocr`. Supports `--dry-run`.
 

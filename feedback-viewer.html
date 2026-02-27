@@ -1,0 +1,1535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Feedback Cluster Viewer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: #dae0e6;
+  color: #1c1c1c;
+  line-height: 1.5;
+}
+
+/* Header */
+.header {
+  background: #003399;
+  color: white;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}
+.header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+.header label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,.15);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background .15s;
+}
+.header label:hover { background: rgba(255,255,255,.25); }
+.header input[type="file"] { display: none; }
+.file-name { font-size: 13px; opacity: .8; }
+.spinner {
+  display: none;
+  width: 20px; height: 20px;
+  border: 3px solid rgba(255,255,255,.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+.spinner.active { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Loading overlay */
+.loading-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.4);
+  z-index: 200;
+  justify-content: center;
+  align-items: center;
+}
+.loading-overlay.active { display: flex; }
+.loading-box {
+  background: white;
+  padding: 32px 48px;
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,.2);
+}
+.loading-box .big-spinner {
+  width: 40px; height: 40px;
+  border: 4px solid #e0e0e0;
+  border-top-color: #003399;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  margin: 0 auto 12px;
+}
+
+/* Container */
+.container { max-width: 900px; margin: 0 auto; padding: 20px 12px; }
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 80px 20px;
+  color: #636e72;
+}
+.empty-state h2 { font-size: 22px; margin-bottom: 8px; color: #2d3436; }
+
+/* Reddit-style post (initiative info) */
+.post {
+  display: none;
+  background: white;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.post.active { display: flex; }
+.post-vote {
+  width: 50px;
+  background: #f8f9fa;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 4px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.vote-arrow {
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  color: #878a8c;
+  font-size: 18px;
+  cursor: default;
+}
+.vote-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1c1c1c;
+  text-align: center;
+  line-height: 1.2;
+}
+.vote-label {
+  font-size: 9px;
+  color: #878a8c;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+.post-body { flex: 1; padding: 12px 16px; }
+.post-meta-line {
+  font-size: 12px;
+  color: #787c7e;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.post-flair {
+  display: inline-block;
+  font-size: 11px;
+  background: #e8f0fe;
+  color: #1a56db;
+  padding: 1px 8px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+.post-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  line-height: 1.3;
+}
+.post-title a { color: #1c1c1c; text-decoration: none; }
+.post-title a:hover { text-decoration: underline; }
+.post-summary {
+  font-size: 14px;
+  color: #4a4a4a;
+  line-height: 1.6;
+  margin-bottom: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.post-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.post-tag {
+  font-size: 11px;
+  background: #edeff1;
+  color: #1c1c1c;
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+.post-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid #edeff1;
+}
+.post-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #878a8c;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+/* Cluster info bar */
+.cluster-info {
+  display: none;
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 14px 20px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.cluster-info.active { display: block; }
+.cluster-info-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: center;
+}
+.cluster-info-item { display: flex; flex-direction: column; }
+.cluster-info-item .ci-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: #878a8c;
+  font-weight: 600;
+}
+.cluster-info-item .ci-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c1c1c;
+}
+.ci-value code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: #f0f0f0;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* Sort / filter bar */
+.controls-bar {
+  display: none;
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.controls-bar.active { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.controls-bar select, .controls-bar input {
+  padding: 6px 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  outline: none;
+}
+.controls-bar select:focus, .controls-bar input:focus {
+  border-color: #003399;
+  box-shadow: 0 0 0 2px rgba(0,51,153,.1);
+}
+.controls-bar label { font-weight: 600; color: #878a8c; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+.search-input {
+  flex: 1;
+  min-width: 180px;
+}
+
+/* Comments (clusters) */
+.comments-section { display: none; }
+.comments-section.active { display: block; }
+.comment-count {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1c1c1c;
+  margin-bottom: 12px;
+}
+
+.cluster-comment {
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.cluster-header {
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.cluster-header:hover { background: #f8f9fa; }
+.cluster-toggle {
+  color: #878a8c;
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  transition: transform .15s;
+}
+.cluster-toggle.expanded { transform: rotate(90deg); }
+.cluster-header-content { flex: 1; min-width: 0; }
+.cluster-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.cluster-size-badge {
+  font-size: 11px;
+  font-weight: 700;
+  background: #003399;
+  color: white;
+  padding: 1px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.cluster-id-label {
+  font-size: 11px;
+  color: #878a8c;
+  flex-shrink: 0;
+}
+
+/* Horizontal bar graphs (shared) */
+.bar-wrap { flex: 1 1 0; min-width: 0; }
+.hbar {
+  display: flex;
+  height: 22px;
+  border-radius: 4px;
+  overflow: hidden;
+  width: 100%;
+  background: #edeff1;
+}
+.hbar-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  position: relative;
+  cursor: default;
+  transition: opacity .15s;
+  overflow: hidden;
+}
+.hbar-seg:hover { opacity: .8; }
+.hbar-seg .seg-label {
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.hbar-seg .seg-label-small {
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  font-weight: 600;
+}
+.hbar-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1c1c1c;
+  color: white;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+}
+.hbar-seg:hover .hbar-tooltip { display: block; }
+.cluster-preview {
+  font-size: 12px;
+  color: #787c7e;
+  margin-top: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Cluster body (expanded) */
+.cluster-body {
+  display: none;
+  border-top: 1px solid #edeff1;
+}
+.cluster-body.open { display: block; }
+
+/* Sub-cluster nesting */
+.sub-cluster {
+  margin-left: 20px;
+  border-left: 2px solid #edeff1;
+}
+.sub-cluster > .cluster-header { padding: 8px 12px; }
+.sub-cluster > .cluster-body { border-top: none; }
+.sub-count {
+  font-size: 10px;
+  color: #878a8c;
+  background: #edeff1;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Cluster detail stats panel */
+.cluster-detail-stats {
+  display: flex;
+  gap: 16px;
+  padding: 14px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #edeff1;
+}
+@media (max-width: 768px) {
+  .cluster-detail-stats { flex-direction: column; }
+}
+.detail-col {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.detail-col-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: #878a8c;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.detail-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.detail-row-flag {
+  font-size: 14px;
+  width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.detail-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1c1c1c;
+}
+.detail-row-count {
+  font-weight: 700;
+  color: #1c1c1c;
+  flex-shrink: 0;
+}
+.detail-row-pct {
+  font-size: 11px;
+  color: #878a8c;
+  flex-shrink: 0;
+  min-width: 38px;
+  text-align: right;
+}
+.detail-row-bar {
+  width: 60px;
+  height: 8px;
+  background: #edeff1;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.detail-row-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+.detail-ut-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.detail-orgs { margin-top: 8px; }
+.detail-orgs-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: #878a8c;
+  font-weight: 600;
+}
+.detail-org-inline {
+  font-size: 11px;
+  color: #4a4a4a;
+}
+.detail-org-sep {
+  color: #bab0ac;
+}
+
+/* Individual feedback reply */
+.reply {
+  padding: 10px 16px 10px 28px;
+  border-bottom: 1px solid #edeff1;
+  position: relative;
+}
+.reply:last-child { border-bottom: none; }
+.reply::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #edeff1;
+}
+.reply:hover::before { background: #003399; }
+.reply-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.reply-author {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1c1c1c;
+}
+.reply-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.reply-meta {
+  font-size: 11px;
+  color: #878a8c;
+}
+.reply-meta span + span::before { content: ' \00B7 '; }
+.reply-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1c1c1c;
+  margin-top: 4px;
+}
+.reply-text-full { white-space: pre-wrap; word-break: break-word; }
+
+/* Expandable text */
+.text-block { margin-top: 8px; }
+.text-block-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: #003399;
+  padding: 2px 0;
+}
+.text-block-header::before {
+  content: '\25B6';
+  font-size: 9px;
+  transition: transform .15s;
+}
+.text-block-header.expanded::before { transform: rotate(90deg); }
+.text-content {
+  display: none;
+  margin-top: 6px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.text-content.open { display: block; }
+
+.reply-attachments { margin-top: 8px; padding-top: 8px; border-top: 1px solid #f0f0f0; }
+.reply-attachments h5 { font-size: 11px; text-transform: uppercase; color: #878a8c; letter-spacing: .3px; margin-bottom: 6px; }
+.att-mini {
+  background: #f8f9fa;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.att-mini-name { font-weight: 600; }
+.att-mini-meta { color: #878a8c; font-size: 11px; }
+
+.expand-link {
+  color: #003399;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 12px;
+}
+.expand-link:hover { text-decoration: underline; }
+
+.show-all-btn {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  background: #f8f9fa;
+  color: #003399;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.show-all-btn:hover { background: #edeff1; }
+
+/* User type colors */
+.ut-EU_CITIZEN { background: #d4efdf; color: #1e8449; }
+.ut-COMPANY { background: #d6eaf8; color: #1a5276; }
+.ut-BUSINESS_ASSOCIATION { background: #d4e6f1; color: #154360; }
+.ut-NGO { background: #fdebd0; color: #af601a; }
+.ut-PUBLIC_AUTHORITY { background: #fadbd8; color: #922b21; }
+.ut-ACADEMIC_RESEARCH_INSTITTUTION { background: #e8daef; color: #6c3483; }
+.ut-TRADE_UNION { background: #f0e0d0; color: #6e4b3a; }
+.ut-ENVIRONMENTAL_ORGANISATION { background: #d5f5e3; color: #239b56; }
+.ut-CONSUMER_ORG { background: #d1f2eb; color: #117a65; }
+.ut-NON_EU_CITIZEN { background: #e8f8f5; color: #0e6655; }
+.ut-OTHER, .ut-unknown { background: #eaecee; color: #566573; }
+
+/* Border colors for replies */
+.bl-EU_CITIZEN { border-left-color: #27ae60; }
+.bl-COMPANY { border-left-color: #2980b9; }
+.bl-BUSINESS_ASSOCIATION { border-left-color: #1a5276; }
+.bl-NGO { border-left-color: #e67e22; }
+.bl-PUBLIC_AUTHORITY { border-left-color: #c0392b; }
+.bl-ACADEMIC_RESEARCH_INSTITTUTION { border-left-color: #8e44ad; }
+.bl-TRADE_UNION { border-left-color: #8b6914; }
+.bl-ENVIRONMENTAL_ORGANISATION { border-left-color: #27ae60; }
+.bl-CONSUMER_ORG { border-left-color: #1abc9c; }
+.bl-NON_EU_CITIZEN { border-left-color: #16a085; }
+.bl-OTHER, .bl-unknown { border-left-color: #95a5a6; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .header { padding: 10px 12px; }
+  .container { padding: 8px; }
+  .post-vote { width: 40px; }
+  .reply { padding-left: 20px; }
+  .reply::before { left: 10px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Feedback Cluster Viewer</h1>
+  <label>
+    <span>Load clustering JSON</span>
+    <input type="file" id="fileInput" accept=".json" multiple>
+  </label>
+  <div class="spinner" id="headerSpinner"></div>
+  <span class="file-name" id="fileName"></span>
+</div>
+
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-box">
+    <div class="big-spinner"></div>
+    <div>Parsing JSON...</div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="empty-state" id="emptyState">
+    <h2>No clustering results loaded</h2>
+    <p>Use the "Load clustering JSON" button to open one or more clustering result JSON files.</p>
+  </div>
+
+  <div class="post" id="postPanel"></div>
+  <div class="cluster-info" id="clusterInfo"></div>
+  <div class="controls-bar" id="controlsBar">
+    <label for="sortSelect">Sort by</label>
+    <select id="sortSelect">
+      <option value="size-desc">Cluster size (largest first)</option>
+      <option value="size-asc">Cluster size (smallest first)</option>
+      <option value="id-asc">Cluster ID</option>
+    </select>
+    <label for="clusterSearch">Search</label>
+    <input type="text" id="clusterSearch" class="search-input" placeholder="Search feedback text, org, country...">
+    <label for="minSize">Min size</label>
+    <input type="number" id="minSize" min="1" value="1" style="width:70px">
+  </div>
+  <div class="comments-section" id="commentsSection"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- State ---
+  let data = null;
+  let clusters = []; // [{label, feedbackItems: [...]}]
+  let filteredClusters = [];
+  const textStore = {};
+  const nodeStore = {};
+
+  // --- User type config ---
+  const USER_TYPE_LABELS = {
+    'EU_CITIZEN': 'EU Citizen',
+    'COMPANY': 'Company',
+    'BUSINESS_ASSOCIATION': 'Business Assoc.',
+    'NGO': 'NGO',
+    'PUBLIC_AUTHORITY': 'Public Authority',
+    'ACADEMIC_RESEARCH_INSTITTUTION': 'Academic/Research',
+    'TRADE_UNION': 'Trade Union',
+    'ENVIRONMENTAL_ORGANISATION': 'Environmental Org',
+    'CONSUMER_ORG': 'Consumer Org',
+    'NON_EU_CITIZEN': 'Non-EU Citizen',
+    'OTHER': 'Other',
+  };
+
+  // --- Helpers ---
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function truncate(text, len) {
+    if (!text || text.length <= len) return text || '';
+    return text.slice(0, len) + '...';
+  }
+
+  function formatDate(d) {
+    if (!d) return '';
+    return d.replace(/\//g, '-').replace(/ .*/, '');
+  }
+
+  function formatBytes(b) {
+    if (!b) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  function utClass(ut) { return ut && USER_TYPE_LABELS[ut] ? ut : 'unknown'; }
+
+  // Convert 2-letter country code to flag emoji via regional indicator symbols
+  function countryToFlag(code) {
+    if (!code || code.length !== 2) return code || '';
+    const upper = code.toUpperCase();
+    const cp1 = 0x1F1E6 + (upper.charCodeAt(0) - 65);
+    const cp2 = 0x1F1E6 + (upper.charCodeAt(1) - 65);
+    return String.fromCodePoint(cp1, cp2);
+  }
+
+  // Palette for country bar segments
+  const BAR_COLORS = [
+    '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
+    '#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac',
+    '#86bcb6','#8cd17d','#b6992d','#499894','#d37295',
+    '#a0cbe8','#ffbe7d','#d4a6c8','#fabfd2','#d7b5a6',
+  ];
+
+  // User type bar colors (background, text)
+  const UT_BAR_COLORS = {
+    'EU_CITIZEN':                     ['#27ae60','#fff'],
+    'COMPANY':                        ['#2980b9','#fff'],
+    'BUSINESS_ASSOCIATION':           ['#1a5276','#fff'],
+    'NGO':                            ['#e67e22','#fff'],
+    'PUBLIC_AUTHORITY':               ['#c0392b','#fff'],
+    'ACADEMIC_RESEARCH_INSTITTUTION': ['#8e44ad','#fff'],
+    'TRADE_UNION':                    ['#8b6914','#fff'],
+    'ENVIRONMENTAL_ORGANISATION':     ['#239b56','#fff'],
+    'CONSUMER_ORG':                   ['#1abc9c','#fff'],
+    'NON_EU_CITIZEN':                 ['#16a085','#fff'],
+    'OTHER':                          ['#95a5a6','#fff'],
+  };
+
+  // Short labels for user types (for bar segments)
+  const UT_SHORT = {
+    'EU_CITIZEN': 'Citizen',
+    'COMPANY': 'Co.',
+    'BUSINESS_ASSOCIATION': 'Biz',
+    'NGO': 'NGO',
+    'PUBLIC_AUTHORITY': 'Gov',
+    'ACADEMIC_RESEARCH_INSTITTUTION': 'Acad',
+    'TRADE_UNION': 'Union',
+    'ENVIRONMENTAL_ORGANISATION': 'Env',
+    'CONSUMER_ORG': 'Cons',
+    'NON_EU_CITIZEN': 'Non-EU',
+    'OTHER': '?',
+  };
+
+  // --- File loading ---
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('fileName').textContent = file.name;
+    document.getElementById('loadingOverlay').classList.add('active');
+    document.getElementById('headerSpinner').classList.add('active');
+
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      setTimeout(function() {
+        try {
+          data = JSON.parse(ev.target.result);
+          processData();
+          render();
+        } catch (err) {
+          alert('Failed to parse JSON: ' + err.message);
+        }
+        document.getElementById('loadingOverlay').classList.remove('active');
+        document.getElementById('headerSpinner').classList.remove('active');
+      }, 50);
+    };
+    reader.readAsText(file);
+  });
+
+  // --- Process data: build cluster tree ---
+  function processData() {
+    clusters = [];
+    Object.keys(nodeStore).forEach(function(k) { delete nodeStore[k]; });
+    if (!data || !data.cluster_assignments) return;
+
+    // Build feedback lookup: id -> feedback object
+    const fbLookup = {};
+    // Check middle_feedback first (unit_summaries format)
+    const allFeedback = data.middle_feedback || [];
+    // Also check publications -> feedback
+    if (!allFeedback.length && data.publications) {
+      data.publications.forEach(function(pub) {
+        (pub.feedback || []).forEach(function(fb) {
+          allFeedback.push(fb);
+        });
+      });
+    }
+    allFeedback.forEach(function(fb) {
+      fbLookup[String(fb.id)] = fb;
+    });
+
+    // Group items by their exact cluster label
+    var labelItems = {};
+    Object.keys(data.cluster_assignments).forEach(function(fbId) {
+      var label = String(data.cluster_assignments[fbId]);
+      if (!labelItems[label]) labelItems[label] = [];
+      var fb = fbLookup[fbId];
+      if (fb) labelItems[label].push(fb);
+    });
+
+    // Build tree node recursively
+    function buildNode(prefix) {
+      var directItems = labelItems[prefix] || [];
+      var children = [];
+      // Find immediate child prefixes (prefix.X)
+      var childSet = {};
+      Object.keys(labelItems).forEach(function(label) {
+        if (label === prefix) return;
+        if (label.indexOf(prefix + '.') === 0) {
+          var rest = label.slice(prefix.length + 1);
+          var nextSeg = rest.split('.')[0];
+          childSet[prefix + '.' + nextSeg] = true;
+        }
+      });
+      Object.keys(childSet).sort(function(a, b) {
+        return a.localeCompare(b, undefined, {numeric: true});
+      }).forEach(function(childPrefix) {
+        children.push(buildNode(childPrefix));
+      });
+      // Collect all items from this node and all descendants
+      var allItems = directItems.slice();
+      children.forEach(function(child) {
+        allItems = allItems.concat(child.allItems);
+      });
+      return { label: prefix, directItems: directItems, children: children, allItems: allItems };
+    }
+
+    // Find top-level labels (first segment before any dot)
+    var topSet = {};
+    Object.keys(labelItems).forEach(function(label) {
+      topSet[label.split('.')[0]] = true;
+    });
+    Object.keys(topSet).sort(function(a, b) {
+      return a.localeCompare(b, undefined, {numeric: true});
+    }).forEach(function(topLabel) {
+      clusters.push(buildNode(topLabel));
+    });
+
+    // Default sort by size desc
+    clusters.sort(function(a, b) { return b.allItems.length - a.allItems.length; });
+    filteredClusters = clusters.slice();
+  }
+
+  // --- Main render ---
+  function render() {
+    document.getElementById('emptyState').style.display = 'none';
+    renderPost();
+    renderClusterInfo();
+    renderControls();
+    renderClusters();
+  }
+
+  // --- Initiative "post" ---
+  function renderPost() {
+    const panel = document.getElementById('postPanel');
+    panel.classList.add('active');
+
+    const totalFeedback = Object.keys(data.cluster_assignments || {}).length;
+    const portalUrl = data.url || ('https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives/' + data.id);
+
+    // Meta line
+    const metaParts = [];
+    if (data.department) metaParts.push('r/' + esc(data.department));
+    if (data.status) metaParts.push(esc(data.status));
+    if (data.stage) metaParts.push(esc(data.stage));
+    if (data.published_date) metaParts.push('Published ' + esc(formatDate(data.published_date)));
+
+    // Tags
+    const allTags = (data.topics || []).concat(data.policy_areas || []);
+
+    let html = `
+      <div class="post-vote">
+        <div class="vote-arrow">\u25B2</div>
+        <div class="vote-count">${totalFeedback.toLocaleString()}</div>
+        <div class="vote-label">feedback</div>
+        <div class="vote-arrow">\u25BC</div>
+      </div>
+      <div class="post-body">
+        <div class="post-meta-line">
+          ${metaParts.join(' &middot; ')}
+          ${data.reference ? ' &middot; <span class="post-flair">' + esc(data.reference) + '</span>' : ''}
+        </div>
+        <div class="post-title">
+          <a href="${esc(portalUrl)}" target="_blank" rel="noopener">${esc(data.short_title || 'Untitled Initiative')}</a>
+        </div>
+        ${data.summary ? '<div class="post-summary">' + esc(data.summary) + '</div>' : ''}
+        ${allTags.length ? '<div class="post-tags">' + allTags.map(function(t) { return '<span class="post-tag">' + esc(t) + '</span>'; }).join('') + '</div>' : ''}`;
+
+    // Before/after feedback summaries as expandable blocks
+    if (data.before_feedback_summary) {
+      html += renderTextBlock('Documents Before Feedback (Summary)', data.before_feedback_summary, 'post-before-sum', false);
+    }
+    if (data.after_feedback_summary) {
+      html += renderTextBlock('Documents After Feedback (Summary)', data.after_feedback_summary, 'post-after-sum', false);
+    }
+
+    html += `
+        <div class="post-actions">
+          <span class="post-action-btn">\uD83D\uDCAC ${clusters.length} clusters</span>
+          <span class="post-action-btn">\uD83D\uDCCA ${totalFeedback.toLocaleString()} feedback items</span>
+          <span class="post-action-btn">\uD83C\uDF10 <a href="${esc(portalUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">EU Portal</a></span>
+        </div>
+      </div>`;
+
+    panel.innerHTML = html;
+  }
+
+  // --- Cluster info bar ---
+  function renderClusterInfo() {
+    const el = document.getElementById('clusterInfo');
+    el.classList.add('active');
+
+    const params = data.cluster_params || {};
+    const paramStr = Object.keys(params).map(function(k) {
+      return '<code>' + esc(k) + '=' + esc(String(params[k])) + '</code>';
+    }).join(' ');
+
+    el.innerHTML = `
+      <div class="cluster-info-grid">
+        <div class="cluster-info-item">
+          <span class="ci-label">Model</span>
+          <span class="ci-value">${esc(data.cluster_model || '?')}</span>
+        </div>
+        <div class="cluster-info-item">
+          <span class="ci-label">Algorithm</span>
+          <span class="ci-value">${esc(data.cluster_algorithm || '?')}</span>
+        </div>
+        <div class="cluster-info-item">
+          <span class="ci-label">Parameters</span>
+          <span class="ci-value">${paramStr || '<code>-</code>'}</span>
+        </div>
+        <div class="cluster-info-item">
+          <span class="ci-label">Clusters</span>
+          <span class="ci-value">${data.cluster_n_clusters != null ? data.cluster_n_clusters : '?'}</span>
+        </div>
+        <div class="cluster-info-item">
+          <span class="ci-label">Noise</span>
+          <span class="ci-value">${data.cluster_noise_count != null ? data.cluster_noise_count : '?'}</span>
+        </div>
+        <div class="cluster-info-item">
+          <span class="ci-label">Silhouette</span>
+          <span class="ci-value">${data.cluster_silhouette != null ? data.cluster_silhouette.toFixed(4) : 'N/A'}</span>
+        </div>
+      </div>`;
+  }
+
+  // --- Controls ---
+  function renderControls() {
+    document.getElementById('controlsBar').classList.add('active');
+  }
+
+  document.getElementById('sortSelect').addEventListener('change', applyFilters);
+  document.getElementById('minSize').addEventListener('change', applyFilters);
+  let searchDebounce = null;
+  document.getElementById('clusterSearch').addEventListener('input', function() {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(applyFilters, 200);
+  });
+
+  function applyFilters() {
+    const sort = document.getElementById('sortSelect').value;
+    const minSize = parseInt(document.getElementById('minSize').value) || 1;
+    const query = document.getElementById('clusterSearch').value.toLowerCase().trim();
+
+    filteredClusters = clusters.filter(function(c) {
+      if (c.allItems.length < minSize) return false;
+      if (query) {
+        return c.allItems.some(function(fb) {
+          const hay = ((fb.feedback_text || '') + ' ' + (fb.organization || '') + ' '
+            + (fb.country || '') + ' ' + (fb.first_name || '') + ' ' + (fb.surname || '')
+            + ' ' + (fb.combined_feedback_summary || '')).toLowerCase();
+          return hay.includes(query);
+        });
+      }
+      return true;
+    });
+
+    if (sort === 'size-desc') {
+      filteredClusters.sort(function(a, b) { return b.allItems.length - a.allItems.length; });
+    } else if (sort === 'size-asc') {
+      filteredClusters.sort(function(a, b) { return a.allItems.length - b.allItems.length; });
+    } else {
+      filteredClusters.sort(function(a, b) { return String(a.label).localeCompare(String(b.label), undefined, {numeric: true}); });
+    }
+
+    renderClusters();
+  }
+
+  // --- Bar chart helpers ---
+  function renderCountryBar(sortedCountries, total) {
+    var html = '<div class="bar-wrap"><div class="hbar">';
+    sortedCountries.forEach(function(entry, idx) {
+      var code = entry[0], count = entry[1];
+      var pct = (count / total * 100);
+      var color = BAR_COLORS[idx % BAR_COLORS.length];
+      var flag = countryToFlag(code);
+      html += '<div class="hbar-seg" style="width:' + pct.toFixed(2) + '%;background:' + color + '">'
+        + '<span class="seg-label">' + flag + '</span>'
+        + '<div class="hbar-tooltip">' + flag + ' ' + esc(code) + ': ' + count + '</div>'
+        + '</div>';
+    });
+    var countryTotal = sortedCountries.reduce(function(s, e) { return s + e[1]; }, 0);
+    if (countryTotal < total) {
+      var unkPct = ((total - countryTotal) / total * 100);
+      html += '<div class="hbar-seg" style="width:' + unkPct.toFixed(2) + '%;background:#edeff1">'
+        + '<span class="seg-label" style="font-size:10px;color:#878a8c">?</span>'
+        + '<div class="hbar-tooltip">Unknown: ' + (total - countryTotal) + '</div>'
+        + '</div>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  function renderUserTypeBar(sortedTypes, total) {
+    var html = '<div class="bar-wrap"><div class="hbar">';
+    sortedTypes.forEach(function(entry) {
+      var ut = entry[0], count = entry[1];
+      var pct = (count / total * 100);
+      var colors = UT_BAR_COLORS[ut] || UT_BAR_COLORS['OTHER'];
+      var shortLabel = UT_SHORT[ut] || ut;
+      var fullLabel = USER_TYPE_LABELS[ut] || ut;
+      html += '<div class="hbar-seg" style="width:' + pct.toFixed(2) + '%;background:' + colors[0] + ';color:' + colors[1] + '">'
+        + '<span class="seg-label-small">' + esc(shortLabel) + '</span>'
+        + '<div class="hbar-tooltip">' + esc(fullLabel) + ': ' + count + '</div>'
+        + '</div>';
+    });
+    html += '</div></div>';
+    return html;
+  }
+
+  // --- Compute stats for a set of feedback items ---
+  function computeClusterStats(items) {
+    var typeCounts = {};
+    var countryCounts = {};
+    items.forEach(function(fb) {
+      var ut = fb.user_type || 'OTHER';
+      typeCounts[ut] = (typeCounts[ut] || 0) + 1;
+      if (fb.country) {
+        countryCounts[fb.country] = (countryCounts[fb.country] || 0) + 1;
+      }
+    });
+    return {
+      sortedTypes: Object.entries(typeCounts).sort(function(a, b) { return b[1] - a[1]; }),
+      sortedCountries: Object.entries(countryCounts).sort(function(a, b) { return b[1] - a[1]; }),
+    };
+  }
+
+  // --- Render clusters as comments ---
+  function renderClusters() {
+    const section = document.getElementById('commentsSection');
+    section.classList.add('active');
+    Object.keys(nodeStore).forEach(function(k) { delete nodeStore[k]; });
+
+    const totalMatching = filteredClusters.reduce(function(s, c) { return s + c.allItems.length; }, 0);
+    let html = '<div class="comment-count">' + filteredClusters.length + ' clusters &middot; '
+      + totalMatching.toLocaleString() + ' feedback items</div>';
+
+    filteredClusters.forEach(function(cluster, ci) {
+      html += renderClusterComment(cluster, ci);
+    });
+
+    section.innerHTML = html;
+  }
+
+  function renderClusterComment(node, ci) {
+    var items = node.allItems;
+    var hasChildren = node.children.length > 0;
+    var stats = computeClusterStats(items);
+    var total = items.length;
+
+    // Preview text: first non-empty feedback
+    var preview = '';
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i].combined_feedback_summary || items[i].feedback_text;
+      if (t) { preview = truncate(t, 150); break; }
+    }
+
+    var INITIAL_SHOW = 5;
+    var clId = 'cl-' + ci;
+    nodeStore[clId] = node;
+
+    var html = '<div class="cluster-comment">';
+
+    // Header
+    html += '<div class="cluster-header" onclick="toggleCluster(\'' + clId + '\')">';
+    html += '<span class="cluster-toggle" id="toggle-' + clId + '">\u25B6</span>';
+    html += '<div class="cluster-header-content">';
+    html += '<div class="cluster-top-row">';
+    html += '<span class="cluster-id-label">#' + node.label + '</span>';
+    html += '<span class="cluster-size-badge">' + items.length + '</span>';
+    if (hasChildren) {
+      html += '<span class="sub-count">' + node.children.length + ' sub-clusters</span>';
+    }
+    html += renderCountryBar(stats.sortedCountries, total);
+    html += renderUserTypeBar(stats.sortedTypes, total);
+    html += '</div>'; // cluster-top-row
+
+    if (preview) {
+      html += '<div class="cluster-preview">' + esc(preview) + '</div>';
+    }
+    html += '</div>'; // cluster-header-content
+    html += '</div>'; // cluster-header
+
+    // Body
+    html += '<div class="cluster-body" id="body-' + clId + '">';
+    html += renderClusterDetailStats(items, stats.sortedCountries, stats.sortedTypes, total);
+
+    if (hasChildren) {
+      // Render sub-clusters as nested threads, largest first
+      var sortedChildren = node.children.slice().sort(function(a, b) { return b.allItems.length - a.allItems.length; });
+      sortedChildren.forEach(function(child, si) {
+        html += renderSubCluster(child, clId + '-s' + si);
+      });
+    } else {
+      // Leaf cluster: render feedback replies
+      var leafItems = node.directItems.length ? node.directItems : node.allItems;
+      var showCount = Math.min(INITIAL_SHOW, leafItems.length);
+      for (var j = 0; j < showCount; j++) {
+        html += renderReply(leafItems[j], clId + '-' + j);
+      }
+      if (leafItems.length > INITIAL_SHOW) {
+        html += '<button class="show-all-btn" id="more-' + clId
+          + '" onclick="showAllReplies(\'' + clId + '\')">Show all '
+          + leafItems.length + ' items (' + (leafItems.length - INITIAL_SHOW) + ' more)</button>';
+      }
+    }
+
+    html += '</div>'; // cluster-body
+    html += '</div>'; // cluster-comment
+    return html;
+  }
+
+  // --- Render a sub-cluster as a nested thread item ---
+  function renderSubCluster(node, scId) {
+    nodeStore[scId] = node;
+    var items = node.allItems;
+    var hasChildren = node.children.length > 0;
+    var stats = computeClusterStats(items);
+    var total = items.length;
+
+    // Preview
+    var preview = '';
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i].combined_feedback_summary || items[i].feedback_text;
+      if (t) { preview = truncate(t, 120); break; }
+    }
+
+    var html = '<div class="sub-cluster">';
+
+    // Header
+    html += '<div class="cluster-header" onclick="toggleCluster(\'' + scId + '\')">';
+    html += '<span class="cluster-toggle" id="toggle-' + scId + '">\u25B6</span>';
+    html += '<div class="cluster-header-content">';
+    html += '<div class="cluster-top-row">';
+    html += '<span class="cluster-id-label">#' + node.label + '</span>';
+    html += '<span class="cluster-size-badge">' + items.length + '</span>';
+    if (hasChildren) {
+      html += '<span class="sub-count">' + node.children.length + ' sub</span>';
+    }
+    html += renderCountryBar(stats.sortedCountries, total);
+    html += renderUserTypeBar(stats.sortedTypes, total);
+    html += '</div>'; // cluster-top-row
+    if (preview) {
+      html += '<div class="cluster-preview">' + esc(preview) + '</div>';
+    }
+    html += '</div>'; // cluster-header-content
+    html += '</div>'; // cluster-header
+
+    // Body
+    html += '<div class="cluster-body" id="body-' + scId + '">';
+    html += renderClusterDetailStats(items, stats.sortedCountries, stats.sortedTypes, total);
+
+    if (hasChildren) {
+      var sortedChildren = node.children.slice().sort(function(a, b) { return b.allItems.length - a.allItems.length; });
+      sortedChildren.forEach(function(child, si) {
+        html += renderSubCluster(child, scId + '-s' + si);
+      });
+    } else {
+      var INITIAL_SHOW = 5;
+      var leafItems = node.directItems.length ? node.directItems : node.allItems;
+      var showCount = Math.min(INITIAL_SHOW, leafItems.length);
+      for (var j = 0; j < showCount; j++) {
+        html += renderReply(leafItems[j], scId + '-' + j);
+      }
+      if (leafItems.length > INITIAL_SHOW) {
+        html += '<button class="show-all-btn" id="more-' + scId
+          + '" onclick="showAllReplies(\'' + scId + '\')">Show all '
+          + leafItems.length + ' items (' + (leafItems.length - INITIAL_SHOW) + ' more)</button>';
+      }
+    }
+
+    html += '</div>'; // cluster-body
+    html += '</div>'; // sub-cluster
+    return html;
+  }
+
+  function renderClusterDetailStats(items, sortedCountries, sortedTypes, total) {
+    var html = '<div class="cluster-detail-stats">';
+
+    // --- Country column ---
+    html += '<div class="detail-col">';
+    html += '<div class="detail-col-title">Countries (' + sortedCountries.length + ')</div>';
+    function countryRow(code, count, idx) {
+      var pct = (count / total * 100);
+      var flag = countryToFlag(code);
+      var color = BAR_COLORS[idx % BAR_COLORS.length];
+      return '<div class="detail-row">'
+        + '<span class="detail-row-flag">' + flag + '</span>'
+        + '<span class="detail-row-label">' + esc(code) + '</span>'
+        + '<span class="detail-row-count">' + count + '</span>'
+        + '<span class="detail-row-pct">' + pct.toFixed(1) + '%</span>'
+        + '<div class="detail-row-bar"><div class="detail-row-bar-fill" style="width:' + pct.toFixed(1) + '%;background:' + color + '"></div></div>'
+        + '</div>';
+    }
+    var COUNTRY_LIMIT = 8;
+    sortedCountries.slice(0, COUNTRY_LIMIT).forEach(function(entry, idx) {
+      html += countryRow(entry[0], entry[1], idx);
+    });
+    var countryTotal = sortedCountries.reduce(function(s, e) { return s + e[1]; }, 0);
+    var hasUnknown = countryTotal < total;
+    var extraCountries = sortedCountries.length - COUNTRY_LIMIT + (hasUnknown ? 1 : 0);
+    if (sortedCountries.length > COUNTRY_LIMIT || hasUnknown) {
+      var cMoreId = 'countries-more-' + Math.random().toString(36).slice(2, 8);
+      var moreCount = Math.max(0, sortedCountries.length - COUNTRY_LIMIT) + (hasUnknown ? 1 : 0);
+      html += '<div class="detail-row"><span class="expand-link" onclick="toggleOrgs(\'' + cMoreId + '\', this)">+' + moreCount + ' more</span></div>';
+      html += '<div id="' + cMoreId + '" style="display:none">';
+      sortedCountries.slice(COUNTRY_LIMIT).forEach(function(entry, idx) {
+        html += countryRow(entry[0], entry[1], COUNTRY_LIMIT + idx);
+      });
+      if (hasUnknown) {
+        var unkCount = total - countryTotal;
+        var unkPct = (unkCount / total * 100);
+        html += '<div class="detail-row">'
+          + '<span class="detail-row-flag" style="color:#878a8c">?</span>'
+          + '<span class="detail-row-label" style="color:#878a8c">Unknown</span>'
+          + '<span class="detail-row-count">' + unkCount + '</span>'
+          + '<span class="detail-row-pct">' + unkPct.toFixed(1) + '%</span>'
+          + '<div class="detail-row-bar"><div class="detail-row-bar-fill" style="width:' + unkPct.toFixed(1) + '%;background:#bab0ac"></div></div>'
+          + '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // --- User type column ---
+    html += '<div class="detail-col">';
+    html += '<div class="detail-col-title">Respondent types (' + sortedTypes.length + ')</div>';
+    sortedTypes.forEach(function(entry) {
+      var ut = entry[0], count = entry[1];
+      var pct = (count / total * 100);
+      var colors = UT_BAR_COLORS[ut] || UT_BAR_COLORS['OTHER'];
+      var fullLabel = USER_TYPE_LABELS[ut] || ut;
+      html += '<div class="detail-row">'
+        + '<span class="detail-ut-dot" style="background:' + colors[0] + '"></span>'
+        + '<span class="detail-row-label">' + esc(fullLabel) + '</span>'
+        + '<span class="detail-row-count">' + count + '</span>'
+        + '<span class="detail-row-pct">' + pct.toFixed(1) + '%</span>'
+        + '<div class="detail-row-bar"><div class="detail-row-bar-fill" style="width:' + pct.toFixed(1) + '%;background:' + colors[0] + '"></div></div>'
+        + '</div>';
+    });
+
+    // --- Organizations sub-section ---
+    var orgs = {};
+    items.forEach(function(fb) {
+      if (fb.organization) {
+        orgs[fb.organization] = (orgs[fb.organization] || 0) + 1;
+      }
+    });
+    var sortedOrgs = Object.entries(orgs).sort(function(a, b) { return b[1] - a[1]; });
+    if (sortedOrgs.length) {
+      html += '<div class="detail-orgs">';
+      html += '<span class="detail-orgs-title">Top organizations: </span>';
+      var showOrgs = sortedOrgs.slice(0, 8);
+      html += showOrgs.map(function(entry) {
+        return '<span class="detail-org-inline">' + esc(entry[0]) + ' <span style="color:#878a8c">(' + entry[1] + ')</span></span>';
+      }).join('<span class="detail-org-sep"> · </span>');
+      if (sortedOrgs.length > 8) {
+        var moreId = 'orgs-more-' + Math.random().toString(36).slice(2, 8);
+        html += ' <span class="expand-link" onclick="toggleOrgs(\'' + moreId + '\', this)">+' + (sortedOrgs.length - 8) + ' more</span>';
+        html += '<span id="' + moreId + '" style="display:none">';
+        html += '<span class="detail-org-sep"> · </span>';
+        html += sortedOrgs.slice(8).map(function(entry) {
+          return '<span class="detail-org-inline">' + esc(entry[0]) + ' <span style="color:#878a8c">(' + entry[1] + ')</span></span>';
+        }).join('<span class="detail-org-sep"> · </span>');
+        html += '</span>';
+      }
+      html += '</div>';
+    }
+
+    html += '</div>'; // detail-col (user types)
+    html += '</div>'; // cluster-detail-stats
+    return html;
+  }
+
+  function renderReply(fb, uid) {
+    const ut = fb.user_type || 'OTHER';
+    const cls = utClass(ut);
+    const label = USER_TYPE_LABELS[ut] || ut || 'Unknown';
+
+    let metaParts = [];
+    if (fb.country) metaParts.push(esc(fb.country));
+    if (fb.organization) metaParts.push(esc(fb.organization));
+    if (fb.first_name || fb.surname) metaParts.push(esc(((fb.first_name || '') + ' ' + (fb.surname || '')).trim()));
+    if (fb.language) metaParts.push(esc(fb.language));
+
+    let html = '<div class="reply">';
+    html += '<div class="reply-header">';
+    html += '<span class="reply-author">' + esc(fb.organization || ((fb.first_name || '') + ' ' + (fb.surname || '')).trim() || 'Anonymous') + '</span>';
+    html += '<span class="reply-badge ut-' + esc(cls) + '">' + esc(label) + '</span>';
+    if (fb.date) html += '<span class="reply-meta"><span>' + esc(formatDate(fb.date)) + '</span></span>';
+    if (fb.url) {
+      html += '<a href="' + esc(fb.url) + '" target="_blank" rel="noopener" style="font-size:11px;color:#003399;text-decoration:none;font-weight:500">\u2197 Portal</a>';
+    }
+    html += '</div>';
+
+    // Feedback meta
+    if (metaParts.length) {
+      html += '<div class="reply-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + '</div>';
+    }
+
+    // Combined summary (if available)
+    const summaryText = fb.combined_feedback_summary;
+    const feedbackText = fb.feedback_text;
+
+    if (summaryText) {
+      // Show summary, with full text expandable
+      if (summaryText.length > 400) {
+        var sid = uid + '-sum';
+        textStore[sid] = summaryText;
+        html += '<div class="reply-text">'
+          + '<span id="' + sid + '-trunc">' + esc(truncate(summaryText, 400))
+          + ' <span class="expand-link" onclick="expandReplyText(\'' + sid + '\')">Show more</span></span>'
+          + '<span id="' + sid + '-full" class="reply-text-full" style="display:none"></span>'
+          + '</div>';
+      } else {
+        html += '<div class="reply-text">' + esc(summaryText) + '</div>';
+      }
+      // Original text expandable
+      if (feedbackText) {
+        html += renderTextBlock('Original Feedback', feedbackText, uid + '-orig', false);
+      }
+    } else if (feedbackText) {
+      if (feedbackText.length > 400) {
+        var fid = uid + '-fb';
+        textStore[fid] = feedbackText;
+        html += '<div class="reply-text">'
+          + '<span id="' + fid + '-trunc">' + esc(truncate(feedbackText, 400))
+          + ' <span class="expand-link" onclick="expandReplyText(\'' + fid + '\')">Show more</span></span>'
+          + '<span id="' + fid + '-full" class="reply-text-full" style="display:none"></span>'
+          + '</div>';
+      } else {
+        html += '<div class="reply-text">' + esc(feedbackText) + '</div>';
+      }
+    } else {
+      html += '<div class="reply-text" style="color:#878a8c;font-style:italic">No feedback text</div>';
+    }
+
+    // Attachments
+    if (fb.attachments && fb.attachments.length) {
+      html += '<div class="reply-attachments"><h5>Attachments (' + fb.attachments.length + ')</h5>';
+      fb.attachments.forEach(function(att, ai) {
+        html += renderAttachmentMini(att, uid + '-att-' + ai);
+      });
+      html += '</div>';
+    }
+
+    html += '</div>'; // reply
+    return html;
+  }
+
+  function renderAttachmentMini(att, uid) {
+    let meta = [];
+    if (att.filename) meta.push(esc(att.filename));
+    if (att.size_bytes) meta.push(formatBytes(att.size_bytes));
+
+    let html = '<div class="att-mini">';
+    html += '<span class="att-mini-name">' + esc(att.filename || 'Attachment') + '</span>';
+    if (meta.length > 1) html += ' <span class="att-mini-meta">' + meta.slice(1).join(' &middot; ') + '</span>';
+    if (att.download_url) {
+      html += ' <a href="' + esc(att.download_url) + '" target="_blank" rel="noopener" style="font-size:11px;color:#003399;font-weight:500">\u2B07 Download</a>';
+    }
+    if (att.summary) {
+      html += renderTextBlock('Summary', att.summary, uid + '-sum', false);
+    }
+    if (att.extracted_text) {
+      html += renderTextBlock('Extracted Text', att.extracted_text, uid + '-ext', false);
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // --- Text expand/collapse ---
+  function renderTextBlock(label, text, textId, startOpen) {
+    textStore[textId] = text;
+    const isLong = text.length > 500;
+    return '<div class="text-block">'
+      + '<div class="text-block-header' + (startOpen ? ' expanded' : '') + '" onclick="toggleText(\'' + textId + '\')">'
+      + esc(label) + (isLong ? ' (' + text.length.toLocaleString() + ' chars)' : '')
+      + '</div>'
+      + '<div class="text-content' + (startOpen ? ' open' : '') + '" id="tc-' + textId + '">'
+      + (startOpen ? esc(text) : '')
+      + '</div></div>';
+  }
+
+  window.toggleText = function(textId) {
+    var header = document.querySelector('[onclick="toggleText(\'' + textId + '\')"]');
+    var content = document.getElementById('tc-' + textId);
+    if (!header || !content) return;
+    var entry = textStore[textId];
+    if (!entry) return;
+    var isOpen = content.classList.contains('open');
+    if (isOpen) {
+      content.classList.remove('open');
+      header.classList.remove('expanded');
+      if (entry.length > 2000) content.innerHTML = '';
+    } else {
+      if (!content.innerHTML || content.innerHTML.length < 10) {
+        content.textContent = entry;
+      }
+      content.classList.add('open');
+      header.classList.add('expanded');
+    }
+  };
+
+  window.expandReplyText = function(id) {
+    var truncEl = document.getElementById(id + '-trunc');
+    var fullEl = document.getElementById(id + '-full');
+    if (!truncEl || !fullEl) return;
+    if (fullEl.style.display === 'none') {
+      // Lazy-load full text + "Show less" link on first expand
+      if (!fullEl.innerHTML) {
+        var t = textStore[id] || '';
+        fullEl.innerHTML = esc(t).replace(/\n/g, '<br>')
+          + ' <span class="expand-link" onclick="expandReplyText(\'' + id + '\')">Show less</span>';
+      }
+      truncEl.style.display = 'none';
+      fullEl.style.display = '';
+    } else {
+      fullEl.style.display = 'none';
+      truncEl.style.display = '';
+    }
+  };
+
+  // --- Cluster toggle ---
+  window.toggleCluster = function(clId) {
+    var body = document.getElementById('body-' + clId);
+    var toggle = document.getElementById('toggle-' + clId);
+    if (!body) return;
+    if (body.classList.contains('open')) {
+      body.classList.remove('open');
+      if (toggle) toggle.classList.remove('expanded');
+    } else {
+      body.classList.add('open');
+      if (toggle) toggle.classList.add('expanded');
+    }
+  };
+
+  // --- Show all replies in a cluster ---
+  window.toggleOrgs = function(id, link) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (el.style.display === 'none') {
+      el.style.display = '';
+      link.textContent = 'Show less';
+    } else {
+      el.style.display = 'none';
+      var count = el.querySelectorAll('.detail-org-inline, .detail-row').length;
+      link.textContent = '+' + count + ' more';
+    }
+  };
+
+  window.showAllReplies = function(nodeId) {
+    var body = document.getElementById('body-' + nodeId);
+    var btn = document.getElementById('more-' + nodeId);
+    var node = nodeStore[nodeId];
+    if (!body || !node) return;
+
+    var items = node.directItems.length ? node.directItems : node.allItems;
+
+    if (btn) btn.remove();
+
+    var fragment = document.createDocumentFragment();
+    for (var i = 5; i < items.length; i++) {
+      var tmp = document.createElement('div');
+      tmp.innerHTML = renderReply(items[i], nodeId + '-' + i);
+      while (tmp.firstChild) fragment.appendChild(tmp.firstChild);
+    }
+    body.appendChild(fragment);
+  };
+
+})();
+</script>
+</body>
+</html>

@@ -1,14 +1,14 @@
 """Run GPU-accelerated OCR on short-extraction PDFs and write updated report.
 
-Takes the short_pdf_report.json and short_pdfs/ directory produced by
-find_short_pdf_extractions.py, runs OCR on each PDF using EasyOCR with CUDA,
+Takes the output directory produced by find_short_pdf_extractions.py (containing
+short_pdf_report.json and pdfs/), runs OCR on each PDF using EasyOCR with CUDA,
 and writes a new JSON with ocr_text populated for each record.
 
 Supports multi-GPU parallelism: each GPU gets a fully separate subprocess
 with its own CUDA_VISIBLE_DEVICES, avoiding CUDA fork issues.
 
 Usage:
-    python3 src/ocr_short_pdfs.py short_pdf_report.json short_pdfs/ -o short_pdf_report_ocr.json
+    python3 src/ocr_short_pdfs.py short_pdfs_output/
 """
 
 import argparse
@@ -84,14 +84,14 @@ def main():
         description="Run GPU-accelerated OCR on short-extraction PDFs."
     )
     parser.add_argument(
-        "report", help="Path to short_pdf_report.json"
+        "input_dir",
+        help="Directory produced by find_short_pdf_extractions.py (contains "
+             "short_pdf_report.json and pdfs/).",
     )
     parser.add_argument(
-        "pdf_dir", help="Directory containing downloaded short-extraction PDFs"
-    )
-    parser.add_argument(
-        "-o", "--output", required=True,
-        help="Output path for updated JSON report with OCR results.",
+        "-o", "--output", type=str, default=None,
+        help="Output path for updated JSON report with OCR results. "
+             "Defaults to {input_dir}/short_pdf_report_ocr.json.",
     )
     parser.add_argument(
         "--languages", type=str, default="en",
@@ -103,14 +103,18 @@ def main():
     )
     args = parser.parse_args()
 
+    report_path = os.path.join(args.input_dir, "short_pdf_report.json")
+    pdf_dir = os.path.join(args.input_dir, "pdfs")
+    output_path = args.output or os.path.join(args.input_dir, "short_pdf_report_ocr.json")
+
     # Subprocess worker mode
     if args.worker:
-        shard_path, output_path, langs_str = args.worker
+        shard_path, worker_out, langs_str = args.worker
         langs = [l.strip() for l in langs_str.split(",")]
-        run_worker(shard_path, output_path, args.pdf_dir, langs)
+        run_worker(shard_path, worker_out, pdf_dir, langs)
         return
 
-    with open(args.report, encoding="utf-8") as f:
+    with open(report_path, encoding="utf-8") as f:
         records = json.load(f)
 
     langs = [l.strip() for l in args.languages.split(",")]
@@ -139,7 +143,7 @@ def main():
             rec["ocr_error"] = "no pdf_file"
             skipped += 1
             continue
-        pdf_path = os.path.join(args.pdf_dir, pdf_file)
+        pdf_path = os.path.join(pdf_dir, pdf_file)
         if not os.path.isfile(pdf_path):
             rec["ocr_text"] = None
             rec["ocr_error"] = f"file not found: {pdf_path}"
@@ -152,9 +156,9 @@ def main():
     print(f"{total_work} PDFs to OCR, {skipped} skipped, {total} total records")
 
     if not work_items:
-        with open(args.output, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
-        print(f"Nothing to do. Wrote {args.output}")
+        print(f"Nothing to do. Wrote {output_path}")
         return
 
     t_start = time.time()
@@ -183,8 +187,7 @@ def main():
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
             p = subprocess.Popen(
-                [sys.executable, __file__, args.report, args.pdf_dir,
-                 "-o", args.output,
+                [sys.executable, __file__, args.input_dir,
                  "--worker", shard_path, out_path, langs_str],
                 env=env,
             )
@@ -233,7 +236,7 @@ def main():
         for item in work_items:
             rec_idx = item["rec_idx"]
             pdf_file = item["pdf_file"]
-            pdf_path = os.path.join(args.pdf_dir, pdf_file)
+            pdf_path = os.path.join(pdf_dir, pdf_file)
             t0 = time.time()
             try:
                 text = ocr_pdf(reader, pdf_path)
@@ -249,10 +252,10 @@ def main():
                 print(f"[{done + errors + skipped}/{total}] {pdf_file}: ERROR {exc}", file=sys.stderr)
 
     total_elapsed = time.time() - t_start
-    with open(args.output, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
-    print(f"\nDone in {total_elapsed:.1f}s. OCR'd {done}, errors {errors}, skipped {skipped}. Wrote {args.output}")
+    print(f"\nDone in {total_elapsed:.1f}s. OCR'd {done}, errors {errors}, skipped {skipped}. Wrote {output_path}")
 
 
 if __name__ == "__main__":

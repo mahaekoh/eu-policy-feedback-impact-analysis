@@ -39,12 +39,9 @@ def main():
         help="Path to initiative_details/ directory.",
     )
     parser.add_argument(
-        "-p", "--pdf-dir", type=str, default=None,
-        help="Directory to download short-extraction PDFs into.",
-    )
-    parser.add_argument(
-        "-o", "--output", type=str, default=None,
-        help="Output path for JSON file with short-extraction records.",
+        "-o", "--out-dir", type=str, default=None,
+        help="Output directory. PDFs are saved to {out_dir}/pdfs/ and the "
+             "report to {out_dir}/short_pdf_report.json.",
     )
     parser.add_argument(
         "-f", "--filter", type=str, default=None,
@@ -74,8 +71,14 @@ def main():
         }
         print(f"Repair report: {len(repair_set)} attachments from {args.repair_report}")
 
-    if args.pdf_dir:
-        Path(args.pdf_dir).mkdir(parents=True, exist_ok=True)
+    pdf_dir = None
+    report_path = None
+    if args.out_dir:
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        pdf_dir = str(out / "pdfs")
+        report_path = str(out / "short_pdf_report.json")
+        Path(pdf_dir).mkdir(parents=True, exist_ok=True)
 
     initiatives = scan_dir(args.source)
 
@@ -145,8 +148,8 @@ def main():
         print(f"         url:  {rec['download_url']}")
 
     # Download PDFs in parallel
-    if args.pdf_dir and records:
-        print(f"\nDownloading {len(records)} PDFs to {args.pdf_dir} ({DOWNLOAD_WORKERS} workers)...")
+    if pdf_dir and records:
+        print(f"\nDownloading {len(records)} PDFs to {pdf_dir} ({DOWNLOAD_WORKERS} workers)...")
         done = 0
         failed = 0
         with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
@@ -155,7 +158,7 @@ def main():
                 if not rec["download_url"]:
                     rec["pdf_file"] = None
                     continue
-                dest = os.path.join(args.pdf_dir, rec["pdf_file"])
+                dest = os.path.join(pdf_dir, rec["pdf_file"])
                 future_to_rec[pool.submit(download_pdf, rec["download_url"], dest)] = rec
 
             for future in as_completed(future_to_rec):
@@ -170,14 +173,14 @@ def main():
                     print(f"  [{done + failed}/{len(future_to_rec)}] FAILED: {rec['pdf_file']} — {exc}", file=sys.stderr)
 
         print(f"Downloaded {done} PDFs ({failed} failed)")
-    elif not args.pdf_dir:
+    else:
         for rec in records:
             rec["pdf_file"] = None
 
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
-        print(f"Wrote {len(records)} records to {args.output}")
+        print(f"Wrote {len(records)} records to {report_path}")
 
     print(f"\nTotal: {len(records)} PDF attachments with suspiciously short extracted text (<100 chars)")
 

@@ -86,8 +86,8 @@ def extract_final_texts(outputs, encoding: HarmonyEncoding) -> list:
                 if message.channel == "final":
                     final_message = message.content[0].text
             results.append(final_message if final_message else gen.text.strip())
-        except Exception as e:
-            print(f"  WARNING: failed to parse output {i}: {e}")
+        except BaseException as e:
+            print(f"  WARNING: failed to parse output {i}: {type(e).__name__}: {e}")
             results.append(_EXTRACT_ERROR)
     return results
 
@@ -306,16 +306,15 @@ def main():
 
         if infer_prompts:
             t0 = time.time()
-            batch_outputs = llm.generate(infer_prompts, sampling_params)
-            elapsed = time.time() - t0
-
-            batch_translations = extract_final_texts(batch_outputs, encoding)
-            batch_errors = 0
-            for k, translation in enumerate(batch_translations):
-                j = infer_indices[k]
-                rec_idx, chunk_idx = prompt_map[j]
-                if translation is _EXTRACT_ERROR:
-                    batch_errors += 1
+            try:
+                batch_outputs = llm.generate(infer_prompts, sampling_params)
+            except BaseException as e:
+                elapsed = time.time() - t0
+                print(f"  BATCH FAILED ({type(e).__name__}: {e}) — marking all {len(infer_prompts)} prompts as failed")
+                batch_errors = len(infer_prompts)
+                for k in range(len(infer_prompts)):
+                    j = infer_indices[k]
+                    rec_idx, chunk_idx = prompt_map[j]
                     failed_prompts.append({
                         "record_index": rec_idx,
                         "chunk_index": chunk_idx,
@@ -323,19 +322,39 @@ def main():
                         "feedback_id": records[rec_idx].get("feedback_id"),
                         "attachment_id": records[rec_idx].get("attachment_id"),
                         "chunk_text": chunk_texts[j],
+                        "batch_error": f"{type(e).__name__}: {e}",
                     })
-                    continue
-                translated_chunks.setdefault(rec_idx, {})[chunk_idx] = translation
-                translation_cache[chunk_texts[j]] = translation
-                batch_results.append({
-                    "record_index": rec_idx,
-                    "chunk_index": chunk_idx,
-                    "initiative_id": records[rec_idx].get("initiative_id"),
-                    "publication_id": records[rec_idx].get("publication_id"),
-                    "feedback_id": records[rec_idx].get("feedback_id"),
-                    "attachment_id": records[rec_idx].get("attachment_id"),
-                    "translation": translation,
-                })
+                batch_outputs = None
+
+            if batch_outputs is not None:
+                elapsed = time.time() - t0
+                batch_translations = extract_final_texts(batch_outputs, encoding)
+                batch_errors = 0
+                for k, translation in enumerate(batch_translations):
+                    j = infer_indices[k]
+                    rec_idx, chunk_idx = prompt_map[j]
+                    if translation is _EXTRACT_ERROR:
+                        batch_errors += 1
+                        failed_prompts.append({
+                            "record_index": rec_idx,
+                            "chunk_index": chunk_idx,
+                            "initiative_id": records[rec_idx].get("initiative_id"),
+                            "feedback_id": records[rec_idx].get("feedback_id"),
+                            "attachment_id": records[rec_idx].get("attachment_id"),
+                            "chunk_text": chunk_texts[j],
+                        })
+                        continue
+                    translated_chunks.setdefault(rec_idx, {})[chunk_idx] = translation
+                    translation_cache[chunk_texts[j]] = translation
+                    batch_results.append({
+                        "record_index": rec_idx,
+                        "chunk_index": chunk_idx,
+                        "initiative_id": records[rec_idx].get("initiative_id"),
+                        "publication_id": records[rec_idx].get("publication_id"),
+                        "feedback_id": records[rec_idx].get("feedback_id"),
+                        "attachment_id": records[rec_idx].get("attachment_id"),
+                        "translation": translation,
+                    })
         else:
             elapsed = 0.0
             batch_errors = 0
