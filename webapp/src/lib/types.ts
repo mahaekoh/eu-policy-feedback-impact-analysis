@@ -112,6 +112,7 @@ export interface InitiativeSummary {
   feedback_timeline: number[];
   last_feedback_date: string;
   has_open_feedback: boolean;
+  feedback_ids: number[];
 }
 
 export type SortOption =

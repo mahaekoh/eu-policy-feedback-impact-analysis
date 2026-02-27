@@ -49,6 +49,17 @@ function extractMetadataFromContent(
       if (isNaN(fid)) return null;
     }
 
+    // Extract feedback IDs (for dedup of initiatives sharing the same feedback).
+    // Feedback objects have the key sequence "id" → "url" → "date", which is
+    // unique to feedback (the top-level initiative has "id" → "url" → "short_title").
+    const feedback_ids: number[] = [];
+    const feedbackIdRe = /"id"\s*:\s*(\d+)\s*,\s*"url"\s*:\s*"[^"]*"\s*,\s*"date"/g;
+    let fim;
+    while ((fim = feedbackIdRe.exec(content)) !== null) {
+      feedback_ids.push(parseInt(fim[1], 10));
+    }
+    feedback_ids.sort((a, b) => a - b);
+
     // Sum total_feedback from publications
     let totalFeedback = 0;
     const fbRe = /"total_feedback"\s*:\s*(\d+)/g;
@@ -137,6 +148,7 @@ function extractMetadataFromContent(
       feedback_timeline,
       last_feedback_date,
       has_open_feedback,
+      feedback_ids,
     };
   } catch {
     return null;
@@ -162,16 +174,42 @@ export async function getInitiativeIndex(): Promise<InitiativeSummary[]> {
     }
   }
 
+  // Deduplicate initiatives that share the exact same set of feedback IDs
+  // (different policy steps that reference a common consultation).
+  // Keep the one with the most documents; ties broken by higher initiative ID.
+  const seen = new Map<string, number>();
+  const remove = new Set<number>();
+  for (let i = 0; i < summaries.length; i++) {
+    const key = summaries[i].feedback_ids.join(",");
+    if (!key) continue; // no feedback — nothing to dedupe
+    const prev = seen.get(key);
+    if (prev !== undefined) {
+      const keepPrev =
+        summaries[prev].total_feedback > summaries[i].total_feedback ||
+        (summaries[prev].total_feedback === summaries[i].total_feedback &&
+          summaries[prev].id > summaries[i].id);
+      if (keepPrev) {
+        remove.add(i);
+      } else {
+        remove.add(prev);
+        seen.set(key, i);
+      }
+    } else {
+      seen.set(key, i);
+    }
+  }
+  const deduped = summaries.filter((_, i) => !remove.has(i));
+
   // Default sort: most recently updated
-  summaries.sort(
+  deduped.sort(
     (a, b) =>
       new Date(b.last_cached_at).getTime() -
       new Date(a.last_cached_at).getTime()
   );
 
-  cachedIndex = summaries;
+  cachedIndex = deduped;
   cachedAt = now;
-  return summaries;
+  return deduped;
 }
 
 export async function getInitiativeDetail(

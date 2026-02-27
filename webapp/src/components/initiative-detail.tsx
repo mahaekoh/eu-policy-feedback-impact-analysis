@@ -64,6 +64,23 @@ export function InitiativeDetail({
   );
   const [loadingScheme, setLoadingScheme] = useState(false);
 
+  const [activePublications, emptyPublications] = useMemo(() => {
+    const active: typeof initiative.publications = [];
+    const empty: typeof initiative.publications = [];
+    for (const p of initiative.publications) {
+      if (
+        p.feedback_status !== "OPEN" &&
+        p.documents.length === 0 &&
+        p.feedback.length === 0
+      ) {
+        empty.push(p);
+      } else {
+        active.push(p);
+      }
+    }
+    return [active, empty];
+  }, [initiative.publications]);
+
   const totalFeedback = initiative.publications.reduce(
     (sum, p) => sum + p.total_feedback,
     0
@@ -275,7 +292,7 @@ export function InitiativeDetail({
           size="sm"
           onClick={() => setViewMode("publications")}
         >
-          Publications ({initiative.publications.length})
+          Publications ({activePublications.length})
         </Button>
         {hasClusters && (
           <Button
@@ -291,13 +308,40 @@ export function InitiativeDetail({
       {/* Publications view */}
       {viewMode === "publications" && (
         <div className="space-y-4">
-          {initiative.publications.map((pub, i) => (
+          {activePublications.map((pub, i) => (
             <PublicationSection
               key={pub.publication_id}
               publication={pub}
               defaultOpen={i === 0}
             />
           ))}
+          {emptyPublications.length > 0 && (
+            <div className="rounded-lg border border-dashed p-4">
+              <p className="text-xs font-medium text-muted-foreground mb-2">
+                {emptyPublications.length} empty{" "}
+                {emptyPublications.length === 1
+                  ? "publication"
+                  : "publications"}
+              </p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {emptyPublications.map((pub) => (
+                  <a
+                    key={pub.publication_id}
+                    href={initiative.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-muted-foreground hover:text-primary transition-colors"
+                  >
+                    {pub.section_label || pub.type.replace(/_/g, " ")}{" "}
+                    <span className="opacity-60">
+                      ({pub.feedback_status.toLowerCase()})
+                    </span>{" "}
+                    &rarr;
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

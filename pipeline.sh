@@ -484,36 +484,42 @@ do_logs() {
 
 do_list() {
     cat <<'EOF'
-Available stages:
+Full pipeline (./pipeline.sh full):
 
-  Local data prep:
-    scrape            Scrape initiatives + details
-    repair            Repair broken attachments
-    find-short-pdfs   Find short PDF extractions for OCR
-    find-nonenglish   Find non-English feedback attachments
-    merge-ocr         Merge OCR results into initiative_details
-    merge-translations  Merge translations into initiative_details
-    analyze           Run initiative_stats (before/after analysis)
-    build-summaries   Build unit summaries from document summaries
-    cluster           Cluster all initiatives (per configured schemes)
+   #  Command                   Description
+   1  scrape                    Scrape initiatives + details
+   2  find-short-pdfs           Find short PDF extractions for OCR
+   3  deploy                    Rsync code to remote
+   4  push ocr                  Push OCR input to remote
+   5  remote ocr                Run GPU OCR on remote
+   6  pull ocr                  Pull OCR results back
+   7  merge-ocr                 Merge OCR results into initiative_details
+   8  find-nonenglish           Find non-English feedback attachments
+   9  push translation          Push translation input to remote
+  10  remote translate          Run GPU translation on remote
+  11  pull translation          Pull translation results back
+  12  merge-translations        Merge translations into initiative_details
+  13  analyze                   Run initiative_stats (before/after analysis)
+  14  push analysis             Push before-after analysis to remote
+  15  remote summarize          Run GPU document summarization on remote
+  16  pull summaries            Pull document summaries back
+  17  build-summaries           Build unit summaries from document summaries
+  18  cluster                   Cluster all initiatives (per configured schemes)
+  19  push unit-summaries       Push unit summaries to remote
+  20  push clustering           Push clustering data to remote
+  21  remote summarize-clusters Run GPU cluster summarization on remote
+  22  pull cluster-summaries    Pull cluster summaries back
+  23  remote summarize-changes  Run GPU change summarization on remote
+  24  pull change-summaries     Pull change summaries back
 
-  Deploy / sync:
-    deploy            Rsync code to remote
-    push <target>     Push data to remote (ocr|translation|analysis|unit-summaries|clustering|all)
-    pull <target>     Pull results from remote (ocr|translation|summaries|classification|cluster-summaries|change-summaries|all)
+Other commands:
+  repair              Repair broken attachments (separate from full pipeline)
+  remote classify     Run GPU classification on remote
+  pull classification Pull classification results back
+  logs                List recent remote logs
+  logs tail [step]    Tail most recent log (optionally filtered by step name)
 
-  Remote execution:
-    remote <step>     Run step on remote (ocr|translate|summarize|classify|summarize-clusters|summarize-changes)
-
-  Logs:
-    logs              List recent remote logs
-    logs tail [step]  Tail most recent log (optionally filtered by step name)
-    logs <step>       Tail most recent log for a step (ocr|translate|summarize|classify|summarize-clusters)
-
-  Composite:
-    full              Full pipeline in dependency order
-
-  Extra args are passed through to the underlying Python scripts.
+Extra args are passed through to the underlying Python scripts.
 EOF
 }
 
