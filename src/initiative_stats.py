@@ -115,6 +115,10 @@ def main():
         "-o", "--output-dir",
         help="Output directory for modified initiative JSONs (all initiatives with feedback).",
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Print detailed per-initiative publication breakdowns.",
+    )
     args = parser.parse_args()
 
     init_ids = sorted(
@@ -210,70 +214,72 @@ def main():
                 json.dump(initiative, f, ensure_ascii=False, indent=2)
             written_count += 1
 
-        print(f"Initiative {init_id}: {title}")
-        print(f"  Total publications: {len(all_pubs)}")
-
-        # Pre-feedback publications
-        print(f"\n  --- Pre-feedback publications ({len(pre_feedback)}) ---")
-        for pub in pre_feedback:
-            print_pub_summary(pub, indent="  ")
-
-        # Final publication (skip if same as last pre-feedback pub)
-        if final_pub["publication_id"] != pre_feedback[-1]["publication_id"]:
-            print(f"\n  --- Final publication ---")
-            print_pub_summary(final_pub, indent="  ")
-        else:
-            print(f"\n  --- Final publication: same as first feedback publication ---")
-
-        # Summary of all publications
-        total_docs = sum(len(p.get("documents", [])) for p in all_pubs)
-        total_fb = sum(len(p.get("feedback", [])) for p in all_pubs)
-        total_fb_att = sum(
-            len(fb.get("attachments", []))
-            for p in all_pubs
-            for fb in p.get("feedback", [])
-        )
-        print(f"\n  Totals: {total_docs} documents, {total_fb} feedback items, {total_fb_att} feedback attachments")
-        print()
-
-    # Initiatives without feedback
-    if no_feedback:
-        print(f"\n{'='*80}")
-        print(f"Initiatives WITHOUT feedback ({len(no_feedback)}):")
-        print(f"{'='*80}\n")
-        for init_id, title, pubs in no_feedback:
+        if args.verbose:
             print(f"Initiative {init_id}: {title}")
-            if pubs:
-                print(f"  Publications: {len(pubs)}")
-                for pub in pubs:
-                    print_pub_summary(pub, indent="  ")
+            print(f"  Total publications: {len(all_pubs)}")
+
+            # Pre-feedback publications
+            print(f"\n  --- Pre-feedback publications ({len(pre_feedback)}) ---")
+            for pub in pre_feedback:
+                print_pub_summary(pub, indent="  ")
+
+            # Final publication (skip if same as last pre-feedback pub)
+            if final_pub["publication_id"] != pre_feedback[-1]["publication_id"]:
+                print(f"\n  --- Final publication ---")
+                print_pub_summary(final_pub, indent="  ")
             else:
-                print(f"  No publications")
+                print(f"\n  --- Final publication: same as first feedback publication ---")
+
+            # Summary of all publications
+            total_docs = sum(len(p.get("documents", [])) for p in all_pubs)
+            total_fb = sum(len(p.get("feedback", [])) for p in all_pubs)
+            total_fb_att = sum(
+                len(fb.get("attachments", []))
+                for p in all_pubs
+                for fb in p.get("feedback", [])
+            )
+            print(f"\n  Totals: {total_docs} documents, {total_fb} feedback items, {total_fb_att} feedback attachments")
             print()
 
-    # Not found
-    if not_found:
-        print(f"\nNot found ({len(not_found)}): {', '.join(str(i) for i in not_found)}")
+    if args.verbose:
+        # Initiatives without feedback
+        if no_feedback:
+            print(f"\n{'='*80}")
+            print(f"Initiatives WITHOUT feedback ({len(no_feedback)}):")
+            print(f"{'='*80}\n")
+            for init_id, title, pubs in no_feedback:
+                print(f"Initiative {init_id}: {title}")
+                if pubs:
+                    print(f"  Publications: {len(pubs)}")
+                    for pub in pubs:
+                        print_pub_summary(pub, indent="  ")
+                else:
+                    print(f"  No publications")
+                print()
 
-    # Final publication type breakdown
-    if final_pub_types:
-        print(f"\nFinal publication type breakdown:")
-        for pub_type, count in sorted(final_pub_types.items(), key=lambda x: -x[1]):
-            print(f"  {pub_type:<30} {count}")
-            for eid, etitle in final_pub_examples[pub_type][:5]:
-                print(f"    e.g. {eid}: {etitle}")
+        # Not found
+        if not_found:
+            print(f"\nNot found ({len(not_found)}): {', '.join(str(i) for i in not_found)}")
 
-    # No publication documents after first feedback
-    if no_docs_after_first_fb:
-        print(f"\nInitiatives with NO publication documents after the first feedback ({len(no_docs_after_first_fb)}):")
-        for eid, etitle in no_docs_after_first_fb:
-            print(f"  {eid}: {etitle}")
+        # Final publication type breakdown
+        if final_pub_types:
+            print(f"\nFinal publication type breakdown:")
+            for pub_type, count in sorted(final_pub_types.items(), key=lambda x: -x[1]):
+                print(f"  {pub_type:<30} {count}")
+                for eid, etitle in final_pub_examples[pub_type][:5]:
+                    print(f"    e.g. {eid}: {etitle}")
 
-    # Feedback only on final publication
-    if feedback_only_on_final:
-        print(f"\nInitiatives with feedback ONLY on the final publication ({len(feedback_only_on_final)}):")
-        for eid, etitle in feedback_only_on_final:
-            print(f"  {eid}: {etitle}")
+        # No publication documents after first feedback
+        if no_docs_after_first_fb:
+            print(f"\nInitiatives with NO publication documents after the first feedback ({len(no_docs_after_first_fb)}):")
+            for eid, etitle in no_docs_after_first_fb:
+                print(f"  {eid}: {etitle}")
+
+        # Feedback only on final publication
+        if feedback_only_on_final:
+            print(f"\nInitiatives with feedback ONLY on the final publication ({len(feedback_only_on_final)}):")
+            for eid, etitle in feedback_only_on_final:
+                print(f"  {eid}: {etitle}")
 
     # Grand totals
     print(f"\nSummary: {len(init_ids)} initiatives, "

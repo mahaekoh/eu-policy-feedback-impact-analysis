@@ -287,8 +287,8 @@ do_pull() {
             stage_start "pull translation results"
             rsync_from_remote data/translation/non_english_attachments_translated.json \
                 data/translation/non_english_attachments_translated.json
-            rsync_from_remote data/translation/translation_batches/ \
-                data/translation/translation_batches/
+            rsync_from_remote data/translation/non_english_attachments_translated_batches/ \
+                data/translation/non_english_attachments_translated_batches/
             stage_end "pull translation results"
             ;;
         summaries)
