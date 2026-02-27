@@ -32,8 +32,6 @@ data/
   clustering/                      # Clustering output (per-scheme subdirs)
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
-config/
-  init-no-response-blacklist-19.txt
 ```
 
 ## Data flow

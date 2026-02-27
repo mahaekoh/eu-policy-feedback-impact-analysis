@@ -600,7 +600,6 @@ Same structure as the summaries output, with additional top-level and per-feedba
 
 | File | Contents |
 |------|----------|
-| `config/init-no-response-blacklist-19.txt` | Initiative IDs with no Commission response after feedback. |
 | `pipeline.conf` | Pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`. |
 
 ## Running the Full Pipeline
