@@ -4,16 +4,18 @@ This document covers the architecture, dependencies, data schemas, and usage of 
 
 ## Architecture
 
+All data lives under `data/`. The pipeline is orchestrated by `pipeline.sh` (see `./pipeline.sh list`).
+
 ```
                             SCRAPING
                             --------
   EU Better Regulation API
           |
           v
-  scrape_eu_initiatives.py ---------> eu_initiatives.csv
-          |
+  scrape_eu_initiatives.py ---------> data/scrape/eu_initiatives.csv
+          |                            (parallel page fetching, 10 workers)
           v
-  scrape_eu_initiative_details.py --> initiative_details/*.json
+  scrape_eu_initiative_details.py --> data/scrape/initiative_details/*.json
           |                            (1,785 files, ~6.8 GB)
           |  text extraction:
           |  PDF (pymupdf4llm + tesseract fallback)
@@ -22,52 +24,54 @@ This document covers the architecture, dependencies, data schemas, and usage of 
           |  For .doc/.docx/.odt/.rtf: tries PDF first (many are mislabeled)
           |
           |
-                          REPAIR
-                          ------
+                          OCR ENRICHMENT
+                          --------------
           |
           v
-  repair_broken_attachments.py -----> repaired_details/*.json + repair_report.json
-          |                            (retries extraction for broken attachments)
-          |
-          |
-                       DATA ENRICHMENT
-                       ---------------
+  find_short_pdf_extractions.py ----> data/ocr/short_pdf_report.json + data/ocr/pdfs/
           |
           v
-  find_short_pdf_extractions.py ----> short_pdf_report.json + short_pdfs/
-          |
-          v
-  ocr_short_pdfs.py ----------------> short_pdf_report_ocr.json
+  ocr_short_pdfs.py ----------------> data/ocr/short_pdf_report_ocr.json
           |                            (EasyOCR + CUDA, 300 DPI)
           v
-  merge_ocr_results.py -------------> initiative_details/*.json (updated in-place)
+  merge_ocr_results.py -------------> data/scrape/initiative_details/*.json (updated in-place)
           |
           |
                         TRANSLATION
                         -----------
           |
           v
-  find_non_english_feedback_attachments.py -> non_english_attachments.json
-          |
+  find_non_english_feedback_attachments.py -> data/translation/non_english_attachments.json
+          |                                    (runs after OCR merge for complete text)
           v
-  translate_attachments.py ----------> non_english_attachments_translated.json
+  translate_attachments.py ----------> data/translation/non_english_attachments_translated.json
           |                            (vLLM + unsloth/gpt-oss-120b)
           v
-  merge_translations.py ------------> initiative_details/*.json (updated in-place)
+  merge_translations.py ------------> data/scrape/initiative_details/*.json (updated in-place)
           |
           |
                          ANALYSIS
                          --------
           |
           v
-  initiative_stats.py -o -----------> before_after_analysis_v3/*.json
+  initiative_stats.py -o -----------> data/analysis/before_after/*.json
           |                            (118 initiative files with before/after structure)
           v
-  summarize_documents.py -----------> summaries_output_v8/*.json
+  summarize_documents.py -----------> data/analysis/summaries/*.json
           |                            (summary fields added to documents & attachments)
           v
-  build_unit_summaries.py ----------> unit_summaries/*.json
-                                       (unified per-initiative summary fields)
+  build_unit_summaries.py ----------> data/analysis/unit_summaries/*.json
+          |                            (unified per-initiative summary fields)
+          |
+          |
+                        CLUSTERING
+                        ----------
+          |
+          v
+  cluster_all_initiatives.py -------> data/clustering/<scheme>/*.json
+          |
+          v
+  summarize_clusters.py ------------> data/cluster_summaries/<scheme>/*.json
 ```
 
 ## Prerequisites
@@ -103,9 +107,9 @@ Enumerates all initiatives from the Better Regulation API.
 python3 src/scrape_eu_initiatives.py
 ```
 
-- **API**: `GET /brpapi/searchInitiatives` with date filters (Dec 2019 - Nov 2024)
-- **Pagination**: page size 10, 0.3s delay between pages, 3 retries on failure
-- **Output**: `eu_initiatives.csv` with columns: `id`, `reference`, `short_title`, `initiative_status`, `act_type`, `feedback_status`, `feedback_start`, `feedback_end`, `topics`, `url`
+- **API**: `GET /brpapi/searchInitiatives` (no date filter — fetches everything available)
+- **Pagination**: page size 10, 10 parallel workers, 3 retries on failure
+- **Output**: `data/scrape/eu_initiatives.csv` with columns: `id`, `reference`, `short_title`, `initiative_status`, `act_type`, `feedback_status`, `feedback_start`, `feedback_end`, `topics`, `url`
 
 #### `scrape_eu_initiative_details.py`
 
@@ -113,7 +117,7 @@ Fetches complete data for each initiative: publications, documents, feedback, an
 
 ```bash
 # Scrape all initiatives into per-file JSONs (supports resume)
-python3 src/scrape_eu_initiative_details.py -o initiative_details/
+python3 src/scrape_eu_initiative_details.py
 
 # Scrape a single initiative to stdout
 python3 src/scrape_eu_initiative_details.py 12970
@@ -134,30 +138,25 @@ python3 src/scrape_eu_initiative_details.py 12970
   6. `.txt` → direct read (UTF-8 with error replacement)
   7. `.zip` → skipped
 - **Resume**: skips initiative IDs that already have a JSON file in the output directory
-- **Output**: one JSON file per initiative in `initiative_details/`
+- **Output**: one JSON file per initiative in `data/scrape/initiative_details/`
 
-### Stage 2: Repair
+### Stage 2: Repair (optional, manual recovery only)
 
 #### `repair_broken_attachments.py`
 
-Scans initiative detail files for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction.
+Scans initiative detail files for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. This is largely redundant with the retry passes built into `scrape_eu_initiative_details.py` (`_retry_extraction_errors()` and `_fix_pdf_as_text()`), but can be useful for recovering from transient network failures after a scrape completes.
 
 ```bash
 # Scan and report (dry run)
-python3 src/repair_broken_attachments.py -o repaired_details/ --dry-run
+python3 src/repair_broken_attachments.py -o data/repair/ --dry-run
 
 # Repair with whitelist filter
-python3 src/repair_broken_attachments.py -o repaired_details/ -f initiative-whitelist-145.txt
-
-# Repair with custom worker count
-python3 src/repair_broken_attachments.py -o repaired_details/ -w 20
+python3 src/repair_broken_attachments.py -o data/repair/ -f config/initiative-whitelist-145.txt
 ```
 
 - **Strategy**: for `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the native format-specific pipeline
 - **Output**: copies of initiative JSONs (only files with at least one repair) to the output directory, plus `repair_report.json`
-- **Repair report**: machine-readable list of repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, usable as `-r` input to downstream scripts
-- **Traceability**: adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments
-- **Downstream scoping**: `find_short_pdf_extractions.py -r` and `find_non_english_feedback_attachments.py -r` accept the repair report to scope processing to just the repaired attachments
+- **Not in the main pipeline**: `pipeline.sh full` does not include this stage. Run it manually with `./pipeline.sh repair` if needed.
 
 ### Stage 3: Data Enrichment (OCR)
 
@@ -166,23 +165,22 @@ python3 src/repair_broken_attachments.py -o repaired_details/ -w 20
 Identifies PDFs where text extraction produced suspiciously little text (likely scanned/image PDFs).
 
 ```bash
-python3 src/find_short_pdf_extractions.py initiative_details/ \
-    -f initiative-whitelist-145.txt \
-    -p short_pdfs/ \
-    -o short_pdf_report.json
+python3 src/find_short_pdf_extractions.py \
+    -i data/scrape/initiative_details \
+    -o data/ocr/
 ```
 
 - **Threshold**: extracted text < 100 characters AND file size > 2 KB
 - **Scans**: both publication documents and feedback attachments
-- **Downloads**: PDFs in parallel (20 workers) to `short_pdfs/`
-- **Output**: `short_pdf_report.json` with metadata and download paths
+- **Downloads**: PDFs in parallel (20 workers) to `data/ocr/pdfs/`
+- **Output**: `data/ocr/short_pdf_report.json` with metadata and download paths
 
 #### `ocr_short_pdfs.py`
 
 Runs GPU-accelerated OCR on the problematic PDFs.
 
 ```bash
-python3 src/ocr_short_pdfs.py short_pdf_report.json short_pdfs/ -o short_pdf_report_ocr.json
+python3 src/ocr_short_pdfs.py data/ocr/
 ```
 
 - **Process**: PDF → render pages at 300 DPI via pymupdf → numpy arrays → EasyOCR with paragraph grouping
@@ -196,10 +194,10 @@ Merges OCR text back into the initiative detail files.
 
 ```bash
 # Preview changes
-python3 src/merge_ocr_results.py short_pdf_report_ocr.json initiative_details/ --dry-run
+python3 src/merge_ocr_results.py data/ocr/short_pdf_report_ocr.json data/scrape/initiative_details/ --dry-run
 
 # Apply
-python3 src/merge_ocr_results.py short_pdf_report_ocr.json initiative_details/
+python3 src/merge_ocr_results.py data/ocr/short_pdf_report_ocr.json data/scrape/initiative_details/
 ```
 
 - **Behavior**: replaces `extracted_text` with OCR result, saves original as `extracted_text_without_ocr`
@@ -213,13 +211,13 @@ Finds feedback attachments where the feedback language is not English.
 
 ```bash
 # Print summary to console
-python3 src/find_non_english_feedback_attachments.py initiative_details/ \
-    -f initiative-whitelist-145.txt
+python3 src/find_non_english_feedback_attachments.py data/scrape/initiative_details/ \
+    -f config/initiative-whitelist-145.txt
 
 # Write JSON for translation pipeline
-python3 src/find_non_english_feedback_attachments.py initiative_details/ \
-    -f initiative-whitelist-145.txt \
-    -o non_english_attachments.json
+python3 src/find_non_english_feedback_attachments.py data/scrape/initiative_details/ \
+    -f config/initiative-whitelist-145.txt \
+    -o data/translation/non_english_attachments.json
 ```
 
 - **Filter**: `feedback.language != "EN"` and attachment has extractable text
@@ -230,8 +228,8 @@ python3 src/find_non_english_feedback_attachments.py initiative_details/ \
 Translates non-English text to English using LLM batch inference.
 
 ```bash
-python3 src/translate_attachments.py non_english_attachments.json \
-    -o non_english_attachments_translated.json \
+python3 src/translate_attachments.py data/translation/non_english_attachments.json \
+    -o data/translation/non_english_attachments_translated.json \
     --batch-size 32
 ```
 
@@ -250,13 +248,13 @@ Merges translations back into initiative detail files.
 
 ```bash
 # From combined output
-python3 src/merge_translations.py non_english_attachments_translated.json initiative_details/
+python3 src/merge_translations.py data/translation/non_english_attachments_translated.json data/scrape/initiative_details/
 
 # From batch directory
-python3 src/merge_translations.py translated_batches/ initiative_details/
+python3 src/merge_translations.py data/translation/translation_batches/ data/scrape/initiative_details/
 
 # Dry run
-python3 src/merge_translations.py translated_batches/ initiative_details/ --dry-run
+python3 src/merge_translations.py data/translation/translation_batches/ data/scrape/initiative_details/ --dry-run
 ```
 
 - **Behavior**: replaces `extracted_text` with translated text, saves original as `extracted_text_before_translation`
@@ -272,11 +270,11 @@ Analyses the publication/feedback timeline for selected initiatives and creates 
 
 ```bash
 # Console stats only
-python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/
+python3 src/initiative_stats.py data/scrape/initiative_details/
 
 # Write enriched JSONs
-python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/ \
-    -o before_after_analysis_v3/
+python3 src/initiative_stats.py data/scrape/initiative_details/ \
+    -o data/analysis/before_after/
 ```
 
 - **Input**: whitelist of initiative IDs + initiative detail directory
@@ -295,8 +293,8 @@ python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/
 Summarizes publication documents and feedback attachments using LLM batch inference.
 
 ```bash
-python3 src/summarize_documents.py before_after_analysis_v3/ \
-    -o summaries_output_v8/ \
+python3 src/summarize_documents.py data/analysis/before_after/ \
+    -o data/analysis/summaries/ \
     --batch-size 16 \
     --initiative-batch-size 10
 ```
@@ -325,7 +323,7 @@ python3 src/summarize_documents.py before_after_analysis_v3/ \
 Consolidates individual document and attachment summaries into per-initiative unified summary fields for downstream analysis.
 
 ```bash
-python3 src/build_unit_summaries.py summaries_output_v8/ -o unit_summaries/
+python3 src/build_unit_summaries.py data/analysis/summaries/ -o data/analysis/unit_summaries/
 ```
 
 - **Input**: output directory from `summarize_documents.py`
@@ -366,7 +364,7 @@ python3 src/find_missing_initiatives.py
 Scans initiative data for documents and attachments that have no `extracted_text`. Supports `-f` for whitelist filtering.
 
 ```bash
-python3 src/find_missing_extracted_text.py initiative_details/ -f initiative-whitelist-145.txt
+python3 src/find_missing_extracted_text.py data/scrape/initiative_details/ -f config/initiative-whitelist-145.txt
 ```
 
 #### `find_initiative_by_pub.py`
@@ -374,7 +372,7 @@ python3 src/find_missing_extracted_text.py initiative_details/ -f initiative-whi
 Lookup utility to find which initiative contains a given publication ID.
 
 ```bash
-python3 src/find_initiative_by_pub.py 15688 initiative_details/
+python3 src/find_initiative_by_pub.py 15688 data/scrape/initiative_details/
 ```
 
 #### `print_chunk.py`
@@ -382,12 +380,12 @@ python3 src/find_initiative_by_pub.py 15688 initiative_details/
 Debug utility to print a specific text chunk from a feedback attachment.
 
 ```bash
-python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" initiative_details/
+python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" data/scrape/initiative_details/
 ```
 
 ## Data Schema
 
-### Initiative JSON (`initiative_details/{id}.json`)
+### Initiative JSON (`data/scrape/initiative_details/{id}.json`)
 
 ```json
 {
@@ -472,7 +470,7 @@ python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" initiat
 }
 ```
 
-### Before/after analysis JSON (`before_after_analysis_v3/{id}.json`)
+### Before/after analysis JSON (`data/analysis/before_after/{id}.json`)
 
 Same structure as the initiative JSON, with three additional top-level fields:
 
@@ -496,84 +494,39 @@ Same structure as the summaries output, with additional top-level and per-feedba
 
 | File | Contents |
 |------|----------|
-| `initiative-whitelist-145.txt` | One initiative ID per line. Used by `initiative_stats.py` and the `-f` filter on other scripts. |
-| `initiatives-with-no-euc-response-after-feedback.txt` | Similar tracking list for non-responsive initiatives. |
+| `config/initiative-whitelist-145.txt` | One initiative ID per line. Used by `initiative_stats.py` and the `-f` filter on other scripts. |
+| `config/init-no-response-blacklist-19.txt` | Initiative IDs with no Commission response after feedback. |
+| `pipeline.conf` | Pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`. |
 
 ## Running the Full Pipeline
 
-```bash
-# 1. Scrape initiative list
-python3 src/scrape_eu_initiatives.py
-
-# 2. Scrape all initiative details (resumable, ~6.8 GB output)
-python3 src/scrape_eu_initiative_details.py -o initiative_details/
-
-# 3. Repair broken attachments (retry failed text extractions)
-python3 src/repair_broken_attachments.py -o repaired_details/ \
-    -f initiative-whitelist-145.txt
-
-# 4. Find and download PDFs with failed text extraction
-python3 src/find_short_pdf_extractions.py initiative_details/ \
-    -f initiative-whitelist-145.txt \
-    -p short_pdfs/ \
-    -o short_pdf_report.json
-
-# 5. Run GPU OCR on those PDFs
-python3 src/ocr_short_pdfs.py short_pdf_report.json short_pdfs/ \
-    -o short_pdf_report_ocr.json
-
-# 6. Merge OCR results back
-python3 src/merge_ocr_results.py short_pdf_report_ocr.json initiative_details/
-
-# 7. Find non-English feedback attachments
-python3 src/find_non_english_feedback_attachments.py initiative_details/ \
-    -f initiative-whitelist-145.txt \
-    -o non_english_attachments.json
-
-# 8. Translate non-English attachments (GPU required)
-python3 src/translate_attachments.py non_english_attachments.json \
-    -o non_english_attachments_translated.json
-
-# 9. Merge translations back
-python3 src/merge_translations.py non_english_attachments_translated.json initiative_details/
-
-# 10. Build before/after analysis structure
-python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/ \
-    -o before_after_analysis_v3/
-
-# 11. Summarize documents and feedback (GPU required)
-python3 src/summarize_documents.py before_after_analysis_v3/ \
-    -o summaries_output_v8/
-
-# 12. Build unified per-initiative summaries
-python3 src/build_unit_summaries.py summaries_output_v8/ -o unit_summaries/
-```
-
-Steps 1-4 and 6-7 run on CPU. Steps 5, 8, and 11 require a GPU.
-
-### Repair pipeline (re-extract broken attachments, then re-run OCR + translation)
-
-After running the repair step (step 3), the repaired files can be run through the OCR and translation stages scoped to just the repaired attachments:
+The pipeline is orchestrated by `pipeline.sh`. First, copy `pipeline.conf.example` to `pipeline.conf` and fill in your remote host details.
 
 ```bash
-# OCR for repaired attachments
-python3 src/find_short_pdf_extractions.py repaired_details/ \
-    -r repaired_details/repair_report.json \
-    -p short_pdfs/ -o short_pdf_report_repair.json
-python3 src/ocr_short_pdfs.py short_pdf_report_repair.json short_pdfs/ \
-    -o short_pdf_report_ocr.json
-python3 src/merge_ocr_results.py short_pdf_report_ocr.json repaired_details/
+# Run the full end-to-end pipeline
+./pipeline.sh full
 
-# Translation for repaired attachments
-python3 src/find_non_english_feedback_attachments.py repaired_details/ \
-    -r repaired_details/repair_report.json \
-    -o non_english_attachments_repair.json
-python3 src/translate_attachments.py non_english_attachments_repair.json \
-    -o non_english_attachments_translated_repair.json
-python3 src/merge_translations.py non_english_attachments_translated_repair.json repaired_details/
+# Or run individual stages
+./pipeline.sh scrape                   # scrape initiatives + details
+./pipeline.sh find-short-pdfs          # find PDFs needing OCR
+./pipeline.sh deploy                   # rsync code to remote GPU host
+./pipeline.sh remote ocr               # run OCR on remote
+./pipeline.sh pull ocr                 # pull OCR results back
+./pipeline.sh merge-ocr                # merge OCR into initiative_details
+
+# See all available stages
+./pipeline.sh list
 ```
 
-**Important:** When using `-r repair_report.json`, point the source at the *repaired* output directory (not the original `initiative_details/`), since the repaired JSONs contain the newly extracted text.
+The `full` pipeline runs in this order:
+
+1. **Scrape** — fetch initiative list + details (CPU)
+2. **OCR pipeline** — find short extractions → deploy → remote OCR → pull → merge (GPU for OCR)
+3. **Translation pipeline** — find non-English (after OCR merge) → deploy → remote translate → pull → merge (GPU for translation)
+4. **Analysis** — before/after structure → deploy → remote summarization → pull (GPU for summarization)
+5. **Clustering** — build unit summaries → cluster → deploy → remote cluster summarization → pull (GPU for summarization)
+
+Extra args are passed through to the underlying Python scripts, e.g. `./pipeline.sh remote summarize --batch-size 16`.
 
 ## Key Design Decisions
 
@@ -591,7 +544,7 @@ For documents spanning multiple chunks, pass 1 summarizes each chunk independent
 
 ### In-place merge pattern
 
-OCR results and translations are generated as separate files, then merged back into `initiative_details/*.json`. The merge scripts preserve original text as `extracted_text_without_ocr` or `extracted_text_before_translation`, making it possible to audit or revert enrichments. All merge scripts support `--dry-run`.
+OCR results and translations are generated as separate files, then merged back into `data/scrape/initiative_details/*.json`. The merge scripts preserve original text as `extracted_text_without_ocr` or `extracted_text_before_translation`, making it possible to audit or revert enrichments. All merge scripts support `--dry-run`.
 
 ### Deduplication and resume
 

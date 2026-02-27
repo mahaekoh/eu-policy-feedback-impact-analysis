@@ -11,7 +11,6 @@ data/
   scrape/                          # Scraped raw data (source of truth)
     eu_initiatives.csv
     eu_initiatives_raw.json
-    eu_initiatives_cache/
     initiative_details/            # Per-initiative JSONs (mutated by merges)
     doc_cache/
   repair/                          # Repair pipeline output
@@ -40,7 +39,7 @@ config/
 ## Data flow
 
 ```
-scrape_eu_initiatives.py          → data/scrape/eu_initiatives.csv + eu_initiatives_raw.json + eu_initiatives_cache/
+scrape_eu_initiatives.py          → data/scrape/eu_initiatives.csv + eu_initiatives_raw.json
 scrape_eu_initiative_details.py   → data/scrape/initiative_details/*.json
 find_short_pdf_extractions.py     → data/ocr/short_pdf_report.json + data/ocr/pdfs/
 ocr_short_pdfs.py                 → data/ocr/short_pdf_report_ocr.json
@@ -77,7 +76,7 @@ merge_translations.py             → updates data/repair/repaired_details/*.jso
 ```
 ./pipeline.sh list                     # show all stages
 ./pipeline.sh <stage> [extra-args...]  # run a single stage
-./pipeline.sh all                      # full pipeline
+./pipeline.sh full                     # full pipeline
 ./pipeline.sh deploy                   # rsync code to remote
 ./pipeline.sh remote summarize         # run summarize on remote GPU
 ./pipeline.sh pull summaries           # rsync results back
@@ -87,7 +86,7 @@ merge_translations.py             → updates data/repair/repaired_details/*.jso
 
 ### Scraping
 
-**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Caches raw API page responses to `data/scrape/eu_initiatives_cache/` for resume and offline use. Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `--cache-dir` and `-o` for custom paths.
+**`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Fetches all pages in parallel (10 workers). Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `-o` for custom output path.
 
 **`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments.
 
