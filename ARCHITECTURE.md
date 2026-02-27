@@ -439,7 +439,7 @@ npm run build  # production build
 
 The app reads data directly from `../data/scrape/initiative_details/` and `../data/clustering/` — no database or import step needed.
 
-### Standalone viewer
+### Standalone viewers
 
 #### `viewers/viewer.html`
 
@@ -450,6 +450,17 @@ Standalone HTML file (no dependencies) for interactively browsing per-initiative
 - **Document features**: download links, feedback portal links, attachment download links
 - **Text display**: expandable blocks for summaries, extracted text, pre-translation originals, pre-OCR originals
 - **Feedback features**: user type color coding, filtering by type/search/empty attachments, chunked infinite scroll for large feedback lists
+
+#### `viewers/feedback-viewer.html`
+
+Standalone HTML file (no dependencies) for browsing clustered feedback results. Loads per-initiative clustering JSON files (from `data/clustering/<scheme>/`) via browser file picker.
+
+- **Cluster metadata**: algorithm, model, parameters, cluster count, noise count, silhouette score
+- **Nested cluster tree**: expandable top-level clusters with sub-clusters, sorted by size or alphabetically
+- **Per-cluster statistics**: country and user-type horizontal stacked bars with tooltips
+- **Feedback items**: submitter info (name, organization, country flag), feedback text, attachments with extracted text
+- **Search**: text filter across feedback text, organization, and country
+- **Noise section**: unclustered feedback items shown separately
 
 ### Utilities
 

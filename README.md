@@ -89,9 +89,10 @@ cd webapp && npm install && npm run dev
 
 The app reads data directly from the `data/` directory — no separate database or import step needed.
 
-### Standalone viewer (`viewers/viewer.html`)
+### Standalone viewers (`viewers/`)
 
-A standalone HTML file (no dependencies) for browsing per-initiative JSON files in the browser. Supports tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll for large feedback lists.
+- **`viewer.html`** — Browse per-initiative JSON files in the browser. Tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll.
+- **`feedback-viewer.html`** — Browse clustered feedback results. Loads clustering JSON files, shows nested cluster trees with per-cluster country/user-type statistics, feedback search, and individual feedback items with attachments.
 
 ## Data Structure
 
@@ -149,7 +150,8 @@ Feedback comes from a range of respondent types as classified by the EU portal:
 
 The output files are standard JSON. You can explore them with:
 
-- **`viewers/viewer.html`**: open in any browser, load a JSON file via file picker — provides tabbed navigation, expandable text, filtering, and color-coded respondent types
+- **`viewers/viewer.html`**: open in any browser, load an initiative JSON — tabbed navigation, expandable text, filtering, and color-coded respondent types
+- **`viewers/feedback-viewer.html`**: open in any browser, load a clustering JSON — nested cluster tree with statistics and search
 - **Python**: `json.load()` to read, then navigate the nested structure
 - **jq** (command line): e.g. `jq '.publications[0].feedback | length' data/scrape/initiative_details/12970.json` to count feedback items
 - **Any JSON viewer**: browser extensions, VS Code, or online tools like [jsoncrack.com](https://jsoncrack.com)

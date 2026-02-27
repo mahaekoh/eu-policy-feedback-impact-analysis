@@ -161,9 +161,11 @@ A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback i
 
 **Running:** `cd webapp && npm run dev` (reads data from `../data/scrape/initiative_details/` and `../data/clustering/`).
 
-### Viewer
+### Viewers
 
 **`viewers/viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.
+
+**`viewers/feedback-viewer.html`** — Standalone HTML file (no dependencies) for browsing clustered feedback results. Loads per-initiative clustering JSON files (from `data/clustering/<scheme>/`) via file picker. Displays cluster metadata (algorithm, model, parameters, silhouette score), nested cluster tree with expandable sub-clusters, per-cluster country and user-type distribution bars, feedback text search, sorting (by size, alphabetical), and individual feedback items with attachments and extracted text.
 
 ### Utilities
 
