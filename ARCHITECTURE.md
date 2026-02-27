@@ -296,8 +296,8 @@ python3 src/summarize_documents.py data/analysis/before_after/ \
     - Feedback attachments: "Combine them into a single summary up to 10 paragraphs."
   - All prompts include: "Be as specific and detailed as possible. If any, preserve all points about nuclear energy, nuclear plants, or small modular reactors. Do not generate any mete commentary (for example stating that there are no nuclear-related points)."
 - **Max output tokens**: 131,072 (`32768 * 4`) per inference call
-- **Chunking**: sentence-boundary splits at 5,000 chars (configurable via `--chunk-size`)
-- **Initiative batching**: processes files in groups (default 10) to manage memory
+- **Chunking**: sentence-boundary splits at 16,384 chars (configurable via `--chunk-size`)
+- **Initiative batching**: processes files in groups (default 128) to manage memory
 - **Deduplication + resume**: same as translation pipeline (cross-batch cache, batch file resume)
 - **Output**: initiative JSONs with `summary` field added to each document and attachment
 
@@ -642,7 +642,7 @@ The detail scraper uses three separate thread pools (initiative, feedback, PDF e
 
 ### Text chunking for LLM inference
 
-Both translation and summarization split long texts at sentence boundaries (default 5,000 characters). The `text_utils.split_into_chunks` function tries `.!?`-followed-by-whitespace splits first, falling back to newline splits if a single sentence exceeds the limit. This keeps semantic units intact while staying within context windows.
+Translation and summarization split long texts at sentence boundaries (default 5,000 characters for translation, 16,384 for summarization). The `text_utils.split_into_chunks` function tries `.!?`-followed-by-whitespace splits first, falling back to newline splits if a single sentence exceeds the limit. This keeps semantic units intact while staying within context windows.
 
 ### Recursive summarization
 
