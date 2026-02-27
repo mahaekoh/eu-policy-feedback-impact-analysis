@@ -153,8 +153,8 @@ Scans initiative detail files for feedback attachments that have `extracted_text
 # Scan and report (dry run)
 python3 src/repair_broken_attachments.py -o data/repair/ --dry-run
 
-# Repair with whitelist filter
-python3 src/repair_broken_attachments.py -o data/repair/ -f config/initiative-whitelist-145.txt
+# Repair all
+python3 src/repair_broken_attachments.py -o data/repair/
 ```
 
 - **Strategy**: for `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the native format-specific pipeline
@@ -214,12 +214,10 @@ Finds feedback attachments where the feedback language is not English.
 
 ```bash
 # Print summary to console
-python3 src/find_non_english_feedback_attachments.py data/scrape/initiative_details/ \
-    -f config/initiative-whitelist-145.txt
+python3 src/find_non_english_feedback_attachments.py data/scrape/initiative_details/
 
 # Write JSON for translation pipeline
 python3 src/find_non_english_feedback_attachments.py data/scrape/initiative_details/ \
-    -f config/initiative-whitelist-145.txt \
     -o data/translation/non_english_attachments.json
 ```
 
@@ -359,7 +357,7 @@ python3 src/summarize_changes.py data/analysis/unit_summaries/ \
 
 ### Viewer
 
-#### `viewer.html`
+#### `viewers/viewer.html`
 
 Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser.
 
@@ -388,7 +386,7 @@ python3 src/find_missing_initiatives.py
 Scans initiative data for documents and attachments that have no `extracted_text`. Supports `-f` for whitelist filtering.
 
 ```bash
-python3 src/find_missing_extracted_text.py data/scrape/initiative_details/ -f config/initiative-whitelist-145.txt
+python3 src/find_missing_extracted_text.py data/scrape/initiative_details/
 ```
 
 #### `find_initiative_by_pub.py`
@@ -518,7 +516,6 @@ Same structure as the summaries output, with additional top-level and per-feedba
 
 | File | Contents |
 |------|----------|
-| `config/initiative-whitelist-145.txt` | One initiative ID per line. Used by the `-f` filter on various scripts. |
 | `config/init-no-response-blacklist-19.txt` | Initiative IDs with no Commission response after feedback. |
 | `pipeline.conf` | Pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`. |
 

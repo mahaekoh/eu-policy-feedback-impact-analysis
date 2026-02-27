@@ -73,7 +73,7 @@ Feedback is clustered across initiatives using sentence embeddings. Each cluster
 
 AI-generated summaries of each feedback cluster, produced by a 120-billion-parameter language model.
 
-### Interactive viewer (`viewer.html`)
+### Interactive viewer (`viewers/viewer.html`)
 
 A standalone HTML file (no dependencies) for browsing per-initiative JSON files in the browser. Supports tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll for large feedback lists.
 
@@ -133,14 +133,13 @@ Feedback comes from a range of respondent types as classified by the EU portal:
 
 The output files are standard JSON. You can explore them with:
 
-- **`viewer.html`**: open in any browser, load a JSON file via file picker — provides tabbed navigation, expandable text, filtering, and color-coded respondent types
+- **`viewers/viewer.html`**: open in any browser, load a JSON file via file picker — provides tabbed navigation, expandable text, filtering, and color-coded respondent types
 - **Python**: `json.load()` to read, then navigate the nested structure
 - **jq** (command line): e.g. `jq '.publications[0].feedback | length' data/scrape/initiative_details/12970.json` to count feedback items
 - **Any JSON viewer**: browser extensions, VS Code, or online tools like [jsoncrack.com](https://jsoncrack.com)
 
 ## Configuration Files
 
-- **`config/initiative-whitelist-145.txt`** — list of 145 initiative IDs selected for detailed analysis (one ID per line)
 - **`pipeline.conf`** — pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`.
 
 ## Running the Pipeline

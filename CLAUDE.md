@@ -33,7 +33,6 @@ data/
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
 config/
-  initiative-whitelist-145.txt
   init-no-response-blacklist-19.txt
 ```
 
@@ -144,7 +143,7 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 ### Viewer
 
-**`viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.
+**`viewers/viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.
 
 ### Utilities
 
