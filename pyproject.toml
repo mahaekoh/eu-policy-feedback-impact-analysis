@@ -1,0 +1,10 @@
+[project]
+name = "eu-policy-feedback-impact-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "easyocr>=1.7.2",
+    "hdbscan>=0.8.41",
+]

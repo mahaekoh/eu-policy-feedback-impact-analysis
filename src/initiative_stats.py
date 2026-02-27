@@ -7,16 +7,17 @@ For each initiative, shows:
   2. The final publication and its documents/attachments
   3. Initiatives without any feedback are listed separately at the end
 
-Optionally writes modified initiative JSONs for initiatives that have
-documents after the first feedback, with added top-level attributes:
+Optionally writes modified initiative JSONs for all initiatives that have
+feedback, with added top-level attributes:
   - documents_before_feedback: docs from pubs up to and including first feedback pub
-  - documents_after_feedback: docs from the final publication
+  - documents_after_feedback: docs from the final publication (empty if no post-feedback docs)
   - middle_feedback: all feedback between the first feedback and the final document
-    (excludes feedback on the final publication)
+    (excludes feedback on the final publication when post-feedback docs exist;
+    includes ALL feedback otherwise)
 
 Usage:
-    python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/
-    python3 src/initiative_stats.py initiative-whitelist-145.txt initiative_details/ -o output_dir/
+    python3 src/initiative_stats.py data/scrape/initiative_details/
+    python3 src/initiative_stats.py data/scrape/initiative_details/ -o data/analysis/before_after/
 """
 
 import argparse
@@ -107,21 +108,20 @@ def main():
         description="Print publication and attachment stats for initiatives."
     )
     parser.add_argument(
-        "whitelist",
-        help="Path to newline-delimited file of initiative IDs",
-    )
-    parser.add_argument(
         "details_dir",
         help="Directory of per-initiative JSON files",
     )
     parser.add_argument(
         "-o", "--output-dir",
-        help="Output directory for modified initiative JSONs (only initiatives with docs after first feedback).",
+        help="Output directory for modified initiative JSONs (all initiatives with feedback).",
     )
     args = parser.parse_args()
 
-    with open(args.whitelist, encoding="utf-8") as f:
-        init_ids = [int(line.strip()) for line in f if line.strip()]
+    init_ids = sorted(
+        int(p.stem)
+        for p in Path(args.details_dir).glob("*.json")
+        if p.stem.isdigit()
+    )
 
     print(f"Loading {len(init_ids)} initiatives from {args.details_dir}/\n")
 
@@ -180,19 +180,24 @@ def main():
                 found_first_fb = True
         if docs_after_first_fb == 0:
             no_docs_after_first_fb.append((init_id, title))
-        elif args.output_dir:
+
+        if args.output_dir:
             # Build documents_before_feedback: docs from pre-feedback pubs
             docs_before = []
             for p in pre_feedback:
                 docs_before.extend(p.get("documents", []))
 
-            # Build documents_after_feedback: docs from the final publication
-            docs_after = list(final_pub.get("documents", []))
+            # Build documents_after_feedback: empty when no post-feedback documents exist
+            if docs_after_first_fb > 0:
+                docs_after = list(final_pub.get("documents", []))
+            else:
+                docs_after = []
 
-            # Build middle_feedback: all feedback from pubs that are not the final pub
+            # Build middle_feedback: when no post-feedback docs, include ALL feedback
+            # (otherwise the final_pub_id skip would exclude the only feedback pub)
             middle_fb = []
             for p in all_pubs:
-                if p["publication_id"] == final_pub_id:
+                if docs_after_first_fb > 0 and p["publication_id"] == final_pub_id:
                     continue
                 middle_fb.extend(p.get("feedback", []))
 

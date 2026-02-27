@@ -55,13 +55,16 @@ All data lives under `data/`. The pipeline is orchestrated by `pipeline.sh` (see
           |
           v
   initiative_stats.py -o -----------> data/analysis/before_after/*.json
-          |                            (118 initiative files with before/after structure)
+          |                            (all initiatives with feedback, before/after structure)
           v
   summarize_documents.py -----------> data/analysis/summaries/*.json
           |                            (summary fields added to documents & attachments)
           v
   build_unit_summaries.py ----------> data/analysis/unit_summaries/*.json
           |                            (unified per-initiative summary fields)
+          v
+  summarize_changes.py ------------> data/analysis/change_summaries/*.json
+          |                            (change_summary field: before vs after diff)
           |
           |
                         CLUSTERING
@@ -266,7 +269,7 @@ python3 src/merge_translations.py data/translation/translation_batches/ data/scr
 
 #### `initiative_stats.py`
 
-Analyses the publication/feedback timeline for selected initiatives and creates the before/after data structure.
+Analyses the publication/feedback timeline for all initiatives in the details directory and creates the before/after data structure.
 
 ```bash
 # Console stats only
@@ -277,15 +280,15 @@ python3 src/initiative_stats.py data/scrape/initiative_details/ \
     -o data/analysis/before_after/
 ```
 
-- **Input**: whitelist of initiative IDs + initiative detail directory
+- **Input**: initiative detail directory (processes all `*.json` files)
 - **Timeline logic**:
   - **Pre-feedback publications**: all publications up to and including the first one that received feedback
   - **Final publication**: last non-`OPC_LAUNCHED` publication that has documents (falls back to last publication if none)
-  - Only outputs initiatives where documents exist after the first feedback publication
+  - Outputs all initiatives with feedback (including those with no post-feedback documents)
 - **Output fields added to initiative JSON**:
   - `documents_before_feedback` — documents from pre-feedback publications
-  - `documents_after_feedback` — documents from the final publication
-  - `middle_feedback` — all feedback from publications between the first feedback pub and the final pub (excludes feedback on the final publication itself)
+  - `documents_after_feedback` — documents from the final publication (empty list when no post-feedback documents exist)
+  - `middle_feedback` — all feedback from publications between the first feedback pub and the final pub (excludes feedback on the final publication when post-feedback docs exist; includes all feedback otherwise)
 - **Console reports**: publication type breakdown, initiatives with no documents after feedback, initiatives with feedback only on the final publication
 
 #### `summarize_documents.py`
@@ -332,6 +335,27 @@ python3 src/build_unit_summaries.py data/analysis/summaries/ -o data/analysis/un
   - `after_feedback_summary` — concatenation of all `summary` fields from `documents_after_feedback`
   - `combined_feedback_summary` — on each `middle_feedback` item: the `feedback_text` plus all attachment `summary` fields, concatenated
 - **Stats**: reports the longest policy-level and feedback-level summaries across all initiatives
+
+#### `summarize_changes.py`
+
+Summarizes the substantive changes between before- and after-feedback documents using LLM batch inference.
+
+```bash
+python3 src/summarize_changes.py data/analysis/unit_summaries/ \
+    -o data/analysis/change_summaries/ \
+    --batch-size 16
+```
+
+- **Model**: `unsloth/gpt-oss-120b` via vLLM
+- **Input**: output directory from `build_unit_summaries.py`
+- **Filtering**: only processes initiatives that have both `before_feedback_summary` and `after_feedback_summary`; others are copied through unchanged
+- **Diff**: computes `difflib.unified_diff` between the two summaries and includes it in the prompt alongside both full texts
+- **Prompt structure**:
+  - System identity: "You are a policy analyst who compares EU regulatory documents before and after public consultation feedback"
+  - User prompt: before summary, after summary, and unified diff, followed by instructions to summarize substantive changes in up to 10 paragraphs
+  - Includes nuclear energy preservation clause
+- **Output**: initiative JSONs with `change_summary` field added at top level
+- **Deduplication + resume**: same as other inference scripts (cross-batch cache, batch file resume)
 
 ### Viewer
 
@@ -494,7 +518,7 @@ Same structure as the summaries output, with additional top-level and per-feedba
 
 | File | Contents |
 |------|----------|
-| `config/initiative-whitelist-145.txt` | One initiative ID per line. Used by `initiative_stats.py` and the `-f` filter on other scripts. |
+| `config/initiative-whitelist-145.txt` | One initiative ID per line. Used by the `-f` filter on various scripts. |
 | `config/init-no-response-blacklist-19.txt` | Initiative IDs with no Commission response after feedback. |
 | `pipeline.conf` | Pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`. |
 
@@ -534,7 +558,8 @@ The `full` pipeline runs in this order:
 2. **OCR pipeline** — find short extractions → deploy → remote OCR → pull → merge (GPU for OCR)
 3. **Translation pipeline** — find non-English (after OCR merge) → deploy → remote translate → pull → merge (GPU for translation)
 4. **Analysis** — before/after structure → deploy → remote summarization → pull (GPU for summarization)
-5. **Clustering** — build unit summaries → cluster → deploy → remote cluster summarization → pull (GPU for summarization)
+5. **Summaries** — build unit summaries → remote change summarization → pull (GPU for summarization)
+6. **Clustering** — cluster → deploy → remote cluster summarization → pull (GPU for summarization)
 
 Extra args are passed through to the underlying Python scripts, e.g. `./pipeline.sh remote summarize --batch-size 16`.
 

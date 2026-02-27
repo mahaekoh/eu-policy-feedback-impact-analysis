@@ -6,12 +6,13 @@ and fetches per-initiative detail from the BRP API.
 
 Outputs: initiative_details/*.json  (one JSON file per initiative)
 
-Uses two thread pools: one for initiatives (20 workers), one for feedback
-pages within each initiative to avoid deadlocks.
+Uses four thread pools: initiatives (20), feedback orchestration (20),
+page fetching (40), and PDF/attachment extraction (40).
 """
 
 import argparse
 import csv
+import datetime
 import io
 import json
 import os
@@ -41,6 +42,7 @@ FEEDBACK_PAGE_SIZE = 500
 INITIATIVE_WORKERS = 20
 FEEDBACK_WORKERS = 20
 PDF_WORKERS = 40
+PAGE_WORKERS = 80
 
 # Publication document cache directory (set via --cache-dir)
 _doc_cache_dir: Optional[Path] = None
@@ -321,10 +323,24 @@ def download_and_extract(download_url: str, filename: str, label: str = "") -> s
     return extract_from_bytes(data, filename, label)
 
 
-def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
+def _parse_feedback_items(
+    content: list, initiative_url: str, old_feedback_lookup: dict = None,
+) -> list[dict]:
+    """Parse feedback items from API response.
+
+    If old_feedback_lookup is provided (dict of fb_id → old fb dict), reuses
+    old attachment dicts when source fields match, avoiding re-download.
+    """
     results = []
     for item in content:
         feedback_id = item.get("id")
+        old_fb = (old_feedback_lookup or {}).get(feedback_id)
+        # Build old attachment lookup for this feedback item
+        old_atts = {}
+        if old_fb is not None:
+            for old_att in old_fb.get("attachments", []):
+                old_atts[old_att["id"]] = old_att
+
         attachments = []
         for att in item.get("attachments", []):
             doc_id = att.get("documentId", "")
@@ -338,18 +354,18 @@ def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
                 "pages": att.get("pages"),
                 "size_bytes": att.get("size"),
             }
-            ext = Path(filename).suffix.lower()
-            if ext in EXTRACTABLE_EXTENSIONS and download_url:
-                fb_label = f"feedback {feedback_id} {filename}"
-                try:
-                    att_record["extracted_text"] = download_and_extract(
-                        download_url, filename, label=fb_label,
-                    )
-                except Exception as exc:
-                    att_record["extracted_text_error"] = str(exc)
-                    print(f"  EXTRACT ERROR feedback {feedback_id} {filename}: {exc}")
+
+            # Check if we can reuse old attachment data
+            old_att = old_atts.get(att_record["id"])
+            if old_att is not None:
+                if (att_record["document_id"] == old_att.get("document_id")
+                        and att_record["pages"] == old_att.get("pages")
+                        and att_record["size_bytes"] == old_att.get("size_bytes")):
+                    att_record.update(old_att)
+
             attachments.append(att_record)
-        results.append({
+
+        fb_record = {
             "id": feedback_id,
             "url": f"{initiative_url}/F{feedback_id}_en",
             "date": item.get("dateFeedback", ""),
@@ -366,7 +382,16 @@ def _parse_feedback_items(content: list, initiative_url: str) -> list[dict]:
             "publication": item.get("publication", ""),
             "tr_number": item.get("trNumber", ""),
             "attachments": attachments,
-        })
+        }
+        # Copy feedback-level derived fields from old record if feedback_text unchanged
+        if old_fb is not None:
+            new_text = fb_record["feedback_text"]
+            old_text = old_fb.get("feedback_text", "")
+            if new_text == old_text:
+                for key in old_fb:
+                    if key not in fb_record:
+                        fb_record[key] = old_fb[key]
+        results.append(fb_record)
     return results
 
 
@@ -382,47 +407,105 @@ def _fetch_feedback_page(publication_id: int, page: int) -> dict:
 def fetch_all_feedback(
     publication_id: int,
     initiative_url: str,
+    old_feedback_lookup: dict = None,
+    page_executor: ThreadPoolExecutor = None,
+    att_executor: ThreadPoolExecutor = None,
 ) -> tuple:
-    """Fetch all feedback for a publication, paginating sequentially.
+    """Fetch all feedback for a publication with parallel page fetching.
 
-    Pages are fetched sequentially to avoid deadlocking the thread pool
-    (this function itself runs inside a pool). With page size 500, most
-    publications need only 1-2 pages.
+    Fetches page 0 inline to determine totalPages, then fetches remaining
+    pages in parallel via page_executor. Attachment text extraction is
+    deferred to att_executor.
+
+    If old_feedback_lookup is provided (dict of fb_id → old fb dict), it is
+    passed through to _parse_feedback_items for skip-extraction merge.
 
     Returns (feedback_list, error_string_or_None).
     """
     t0 = time.time()
     all_feedback = []
-    page = 0
+    total_pages = 1
     error = None
 
     try:
-        while True:
-            data = _fetch_feedback_page(publication_id, page)
-            all_feedback.extend(
-                _parse_feedback_items(data.get("content", []), initiative_url)
-            )
-            if data.get("last", True):
-                break
-            page += 1
+        # Fetch page 0 inline to get totalPages
+        data0 = _fetch_feedback_page(publication_id, 0)
+        total_pages = data0.get("totalPages", 1)
+        page_results = {0: data0}
+
+        # Fetch remaining pages in parallel
+        if total_pages > 1 and page_executor is not None:
+            page_futures = {
+                page_executor.submit(_fetch_feedback_page, publication_id, p): p
+                for p in range(1, total_pages)
+            }
+            for future in as_completed(page_futures):
+                p = page_futures[future]
+                page_results[p] = future.result()
+        elif total_pages > 1:
+            # Fallback: sequential fetch if no page_executor
+            for p in range(1, total_pages):
+                page_results[p] = _fetch_feedback_page(publication_id, p)
+
+        # Parse all pages in order
+        for p in range(total_pages):
+            if p in page_results:
+                all_feedback.extend(
+                    _parse_feedback_items(
+                        page_results[p].get("content", []),
+                        initiative_url,
+                        old_feedback_lookup,
+                    )
+                )
+
+        # Deferred attachment extraction: collect attachments needing extraction
+        att_tasks = []  # (att_dict, feedback_id)
+        for fb in all_feedback:
+            for att in fb.get("attachments", []):
+                if "extracted_text" in att or "extracted_text_error" in att:
+                    continue
+                ext = Path(att.get("filename", "")).suffix.lower()
+                if ext in EXTRACTABLE_EXTENSIONS and att.get("download_url"):
+                    att_tasks.append((att, fb["id"]))
+
+        if att_tasks and att_executor is not None:
+            att_futures = [
+                att_executor.submit(_extract_feedback_attachment, att, fb_id)
+                for att, fb_id in att_tasks
+            ]
+            for future in att_futures:
+                future.result()
+        elif att_tasks:
+            # Fallback: sequential extraction if no att_executor
+            for att, fb_id in att_tasks:
+                _extract_feedback_attachment(att, fb_id)
+
     except Exception as exc:
         error = str(exc)
         print(
             f"  FEEDBACK ERROR pub={publication_id}: {error} "
-            f"(got {len(all_feedback)} items from {page} pages before failure)"
+            f"(got {len(all_feedback)} items, {total_pages} total pages)"
         )
 
     elapsed = time.time() - t0
-    if elapsed > 10 or page > 1:
+    if elapsed > 10 or total_pages > 1:
         print(
             f"  FEEDBACK pub={publication_id}: {len(all_feedback)} items, "
-            f"{page+1} pages, {elapsed:.1f}s"
+            f"{total_pages} pages, {elapsed:.1f}s"
         )
     return all_feedback, error
 
 
-def _extract_text_for_doc(doc: dict, pub_id: int, init_id=None):
-    """Download and extract text for a single publication document. Mutates doc in place."""
+def _extract_text_for_doc(doc: dict, pub_id: int, init_id=None, old_doc: dict = None):
+    """Download and extract text for a single publication document. Mutates doc in place.
+
+    If old_doc is provided and source fields (pages, size_bytes) match, copies the
+    old doc's derived fields (extracted_text, summary, etc.) instead of re-downloading.
+    """
+    if old_doc is not None:
+        if doc.get("pages") == old_doc.get("pages") and doc.get("size_bytes") == old_doc.get("size_bytes"):
+            doc.update(old_doc)
+            return
     label = f"pub={pub_id} {doc['filename']}"
     try:
         data = _download_or_cache(
@@ -435,10 +518,42 @@ def _extract_text_for_doc(doc: dict, pub_id: int, init_id=None):
         print(f"  EXTRACT ERROR pub={pub_id} {doc['filename']}: {exc}")
 
 
+def _extract_feedback_attachment(att: dict, feedback_id):
+    """Download and extract text for a single feedback attachment. Mutates att in place."""
+    label = f"feedback {feedback_id} {att['filename']}"
+    try:
+        att["extracted_text"] = download_and_extract(
+            att["download_url"], att["filename"], label=label,
+        )
+    except Exception as exc:
+        att["extracted_text_error"] = str(exc)
+        print(f"  EXTRACT ERROR {label}: {exc}")
+
+
 def extract_publications(
     pubs: list, initiative_url: str, fb_executor: ThreadPoolExecutor,
     pdf_executor: ThreadPoolExecutor = None, init_id=None,
+    old_publications: list = None,
+    page_executor: ThreadPoolExecutor = None,
 ) -> list[dict]:
+    """Extract publication data, documents, and feedback.
+
+    If old_publications is provided (from a previous scrape), builds lookup dicts
+    to reuse derived fields (extracted_text, summary, etc.) on unchanged items.
+    """
+    # Build old-data lookups for merge
+    old_docs = {}       # doc_id → doc dict
+    old_fb_by_pub = {}  # pub_id → {fb_id → fb dict}
+    if old_publications:
+        for old_pub in old_publications:
+            opid = old_pub["publication_id"]
+            for doc in old_pub.get("documents", []):
+                old_docs[doc["doc_id"]] = doc
+            fb_lookup = {}
+            for fb in old_pub.get("feedback", []):
+                fb_lookup[fb["id"]] = fb
+            old_fb_by_pub[opid] = fb_lookup
+
     sections = []
 
     # Submit all feedback and PDF fetches to the pool in parallel
@@ -475,13 +590,18 @@ def extract_publications(
         for doc in documents:
             ext = Path(doc["filename"]).suffix.lower()
             if ext in EXTRACTABLE_EXTENSIONS and doc["download_url"]:
+                old_doc = old_docs.get(doc["doc_id"])
                 pdf_futures.append(
-                    _pdf_pool.submit(_extract_text_for_doc, doc, pub_id, init_id)
+                    _pdf_pool.submit(
+                        _extract_text_for_doc, doc, pub_id, init_id, old_doc,
+                    )
                 )
 
         if total_feedback > 0 and pub_id:
+            pub_old_fb = old_fb_by_pub.get(pub_id)
             fb_futures[i] = fb_executor.submit(
-                fetch_all_feedback, pub_id, initiative_url
+                fetch_all_feedback, pub_id, initiative_url, pub_old_fb,
+                page_executor, _pdf_pool,
             )
 
     # Wait for all PDF extractions
@@ -501,11 +621,20 @@ def extract_publications(
 def extract_initiative(
     data: dict, url: str, fb_executor: ThreadPoolExecutor,
     pdf_executor: ThreadPoolExecutor = None,
+    old_record: dict = None,
+    page_executor: ThreadPoolExecutor = None,
 ) -> dict:
+    """Extract initiative data from API response.
+
+    If old_record is provided (from a previous scrape), passes its publications
+    through to extract_publications for skip-extraction merge.
+    """
     init_id = data.get("id")
     topics = [t.get("label", "") for t in data.get("topics", [])]
     policy_areas = [p.get("label", "") for p in data.get("policyAreas", [])]
     act_type_code = data.get("foreseenActType", "")
+
+    old_pubs = old_record.get("publications") if old_record else None
 
     return {
         "id": init_id,
@@ -523,7 +652,8 @@ def extract_initiative(
         "published_date": data.get("publishedDate", ""),
         "publications": extract_publications(
             data.get("publications", []), url, fb_executor, pdf_executor,
-            init_id=init_id,
+            init_id=init_id, old_publications=old_pubs,
+            page_executor=page_executor,
         ),
     }
 
@@ -703,7 +833,52 @@ def _fix_pdf_as_text(out_path: Path):
     print(f"PDF-as-text fix complete: {fixed_total} fixed, {failed_total} failed")
 
 
-def main(out_dir: str = None, cache_dir: str = None):
+_TERMINAL_STAGES = {"SUSPENDED", "ABANDONED"}
+_CLOSED_FEEDBACK_STATUSES = {"CLOSED", "DISABLED", ""}
+
+
+def needs_update(path: Path, max_age_hours: float) -> bool:
+    """Check whether a cached initiative JSON is stale and should be re-fetched.
+
+    Reads partial file content to avoid loading entire JSON when possible.
+    Returns True if the file should be re-fetched.
+    """
+    head = path.read_bytes()[:4096].decode("utf-8", errors="replace")
+
+    # Extract last_cached_at
+    m = re.search(r'"last_cached_at"\s*:\s*"([^"]+)"', head)
+    if m:
+        try:
+            cached_at = datetime.datetime.fromisoformat(m.group(1))
+            if cached_at.tzinfo is None:
+                cached_at = cached_at.replace(tzinfo=datetime.timezone.utc)
+            age_hours = (datetime.datetime.now(datetime.timezone.utc) - cached_at).total_seconds() / 3600
+            if age_hours < max_age_hours:
+                return False
+        except ValueError:
+            pass  # malformed timestamp, treat as stale
+    # else: legacy file without timestamp → treat as stale
+
+    # Check stage — terminal stages never need re-checking
+    m_stage = re.search(r'"stage"\s*:\s*"([^"]*)"', head)
+    if m_stage and m_stage.group(1) in _TERMINAL_STAGES:
+        return False
+
+    # ADOPTION_WORKFLOW: only update if feedback is still open/upcoming
+    if m_stage and m_stage.group(1) == "ADOPTION_WORKFLOW":
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        statuses = {
+            pub.get("feedback_status", "")
+            for pub in data.get("publications", [])
+        }
+        if statuses and statuses <= _CLOSED_FEEDBACK_STATUSES:
+            return False
+
+    return True
+
+
+def main(out_dir: str = None, cache_dir: str = None, max_age_hours: float = 48):
     global _doc_cache_dir
     if cache_dir:
         _doc_cache_dir = Path(cache_dir)
@@ -718,32 +893,53 @@ def main(out_dir: str = None, cache_dir: str = None):
 
     out_path = Path(out_dir) if out_dir else Path(__file__).parent.parent / "data" / "scrape" / "initiative_details"
     out_path.mkdir(parents=True, exist_ok=True)
-    # Resume: check which IDs already have files
-    done_ids = set()
-    for p in out_path.glob("*.json"):
-        try:
-            done_ids.add(int(p.stem))
-        except ValueError:
-            pass
     print(f"Output dir: {out_path}")
 
-    if done_ids:
-        print(f"Resuming — {len(done_ids)} already scraped")
+    # Categorize existing files: SKIP (fresh), STALE (re-fetch with merge), or NEW
+    skip_ids = set()
+    stale_records = {}  # init_id → loaded JSON for merge
+    for p in out_path.glob("*.json"):
+        try:
+            init_id = int(p.stem)
+        except ValueError:
+            continue
+        if needs_update(p, max_age_hours):
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            if "error" not in data:
+                stale_records[init_id] = data
+            # else: error files are treated as new (re-fetch from scratch)
+        else:
+            skip_ids.add(init_id)
 
-    remaining = [(r["url"], r["id"]) for r in rows if int(r["id"]) not in done_ids]
+    csv_ids = {int(r["id"]) for r in rows}
+    new_count = len(csv_ids - skip_ids - set(stale_records))
+    print(
+        f"Cached: {len(skip_ids)} fresh, {len(stale_records)} stale"
+        f" — {new_count} new, {new_count + len(stale_records)} to fetch"
+    )
+
+    remaining = [
+        (r["url"], r["id"])
+        for r in rows
+        if int(r["id"]) not in skip_ids
+    ]
     total = len(rows)
     print(f"Remaining: {len(remaining)}")
 
     write_lock = threading.Lock()
-    done_count = len(done_ids)
+    done_count = len(skip_ids)
     error_count = 0
 
     # Separate pools to avoid deadlock with initiative pool
     fb_executor = ThreadPoolExecutor(max_workers=FEEDBACK_WORKERS)
     pdf_executor = ThreadPoolExecutor(max_workers=PDF_WORKERS)
+    page_executor = ThreadPoolExecutor(max_workers=PAGE_WORKERS)
 
     def handle_initiative(url: str, init_id: str):
         nonlocal done_count, error_count
+        old_record = stale_records.get(int(init_id))
+        is_update = old_record is not None
         t_start = time.time()
         try:
             data = fetch_json(
@@ -751,11 +947,16 @@ def main(out_dir: str = None, cache_dir: str = None):
                 label=f"initiative {init_id}",
             )
             t_api = time.time()
-            record = extract_initiative(data, url, fb_executor, pdf_executor)
+            record = extract_initiative(
+                data, url, fb_executor, pdf_executor,
+                old_record=old_record, page_executor=page_executor,
+            )
+            record["last_cached_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             t_end = time.time()
             n_docs = sum(len(p["documents"]) for p in record["publications"])
             n_fb = sum(len(p["feedback"]) for p in record["publications"])
             total_elapsed = t_end - t_start
+            tag = "UPD" if is_update else "NEW"
             with write_lock:
                 file_path = out_path / f"{init_id}.json"
                 with open(file_path, "w", encoding="utf-8") as f:
@@ -763,7 +964,7 @@ def main(out_dir: str = None, cache_dir: str = None):
                 done_count += 1
                 dc = done_count
             print(
-                f"[{dc}/{total}] ID {init_id}: "
+                f"[{dc}/{total}] {tag} ID {init_id}: "
                 f"{len(record['publications'])} sections, "
                 f"{n_docs} docs, {n_fb} feedback "
                 f"(api={t_api - t_start:.1f}s, feedback={t_end - t_api:.1f}s, "
@@ -795,6 +996,7 @@ def main(out_dir: str = None, cache_dir: str = None):
     finally:
         fb_executor.shutdown(wait=False)
         pdf_executor.shutdown(wait=False)
+        page_executor.shutdown(wait=False)
 
     # --- Retry extraction errors in existing files ---
     _retry_extraction_errors(out_path)
@@ -822,6 +1024,7 @@ def scrape_one(init_id: int, cache_dir: str = None):
 
     fb_executor = ThreadPoolExecutor(max_workers=FEEDBACK_WORKERS)
     pdf_executor = ThreadPoolExecutor(max_workers=PDF_WORKERS)
+    page_executor = ThreadPoolExecutor(max_workers=PAGE_WORKERS)
     try:
         data = fetch_json(
             f"{API_BASE}/groupInitiatives/{init_id}",
@@ -829,7 +1032,10 @@ def scrape_one(init_id: int, cache_dir: str = None):
         )
         slug = data.get("shortTitle", "")
         url = f"https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives/{init_id}-{slug}_en"
-        record = extract_initiative(data, url, fb_executor, pdf_executor)
+        record = extract_initiative(
+            data, url, fb_executor, pdf_executor, page_executor=page_executor,
+        )
+        record["last_cached_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         n_docs = sum(len(p["documents"]) for p in record["publications"])
         n_fb = sum(len(p["feedback"]) for p in record["publications"])
         print(
@@ -840,6 +1046,7 @@ def scrape_one(init_id: int, cache_dir: str = None):
     finally:
         fb_executor.shutdown(wait=False)
         pdf_executor.shutdown(wait=False)
+        page_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":
@@ -860,9 +1067,14 @@ if __name__ == "__main__":
         help="Directory to cache downloaded publication document files. "
              "When set, raw files are saved and reused on subsequent runs.",
     )
+    parser.add_argument(
+        "--max-age", type=float, default=48,
+        help="Max age in hours before re-fetching a cached initiative "
+             "(default: 48). Set to 0 to force update all.",
+    )
     args = parser.parse_args()
 
     if args.initiative_id is not None:
         scrape_one(args.initiative_id, cache_dir=args.cache_dir)
     else:
-        main(out_dir=args.out_dir, cache_dir=args.cache_dir)
+        main(out_dir=args.out_dir, cache_dir=args.cache_dir, max_age_hours=args.max_age)

@@ -28,6 +28,7 @@ data/
     before_after/                  # initiative_stats output
     summaries/                     # summarize_documents output
     unit_summaries/                # build_unit_summaries output
+    change_summaries/              # summarize_changes output
   clustering/                      # Clustering output (per-scheme subdirs)
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
@@ -50,6 +51,7 @@ merge_translations.py             → updates data/scrape/initiative_details/*.j
 initiative_stats.py               → data/analysis/before_after/*.json
 summarize_documents.py            → data/analysis/summaries/*.json
 build_unit_summaries.py           → data/analysis/unit_summaries/*.json
+summarize_changes.py              → data/analysis/change_summaries/*.json
 cluster_all_initiatives.py        → data/clustering/<scheme>/*.json
 classify_initiative_and_feedback.py → data/classification/*.json
 summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
@@ -77,7 +79,7 @@ merge_translations.py             → updates data/repair/repaired_details/*.jso
 ./pipeline.sh list                     # show all stages
 ./pipeline.sh <stage> [extra-args...]  # run a single stage
 ./pipeline.sh full                     # full pipeline
-./pipeline.sh deploy                   # rsync code to remote
+./pipeline.sh deploy                   # rsync src/ to remote
 ./pipeline.sh remote summarize         # run summarize on remote GPU
 ./pipeline.sh pull summaries           # rsync results back
 ./pipeline.sh logs                     # list recent remote logs
@@ -92,7 +94,7 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 **`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Fetches all pages in parallel (10 workers). Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `-o` for custom output path.
 
-**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments.
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Each output JSON includes a `last_cached_at` ISO 8601 timestamp. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments. Supports `--max-age HOURS` (default 48) for incremental updates: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, `repair_method`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age.
 
 ### Analysis / reporting
 
@@ -120,11 +122,13 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 ### Summarization pipeline
 
-**`src/initiative_stats.py`** — Analyzes initiative publication/feedback structure. With `-o`, writes per-initiative JSONs with `documents_before_feedback`, `documents_after_feedback`, and `middle_feedback` attributes for initiatives that have documents after first feedback.
+**`src/initiative_stats.py`** — Analyzes initiative publication/feedback structure for all initiatives in the details directory. With `-o`, writes per-initiative JSONs with `documents_before_feedback`, `documents_after_feedback` (empty when no post-feedback docs exist), and `middle_feedback` attributes for all initiatives with feedback.
 
 **`src/summarize_documents.py`** — Summarizes publication documents and feedback attachments using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes the output of `initiative_stats.py -o`. Long texts are split into chunks at sentence boundaries (default 5000 chars), each chunk is summarized (pass 1), then multi-chunk summaries are recursively combined in groups of up to `--max-combine-chunks` (default 4) until a single summary remains. Both documents and feedback attachments are summarized into up to 10 paragraphs per chunk, and combined summaries are also up to 10 paragraphs. Adds `summary` field to each document and attachment object. Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Within a run, per-batch result files in `_batches_pass1/group_NNNN/` and `_batches_pass2/group_NNNN/` provide crash recovery for incomplete groups.
 
 **`src/build_unit_summaries.py`** — Consolidates individual document and attachment summaries into per-initiative unified summary fields. Takes the output of `summarize_documents.py`. Adds `before_feedback_summary` (concatenation of document summaries from before feedback), `after_feedback_summary` (from after feedback), and `combined_feedback_summary` (feedback text + attachment summaries) on each middle feedback item. All concatenation joins on `\n\n`.
+
+**`src/summarize_changes.py`** — Summarizes substantive changes between before- and after-feedback documents using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes the output of `build_unit_summaries.py`. For each initiative with both `before_feedback_summary` and `after_feedback_summary`, computes a unified diff and asks the LLM to describe what changed in up to 10 paragraphs. Adds `change_summary` field at top level. Initiatives missing either summary are copied through unchanged. Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Per-batch result files in `_batches/` provide crash recovery.
 
 ### Clustering & classification
 
@@ -143,6 +147,8 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 **`viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.
 
 ### Utilities
+
+**`src/inference_utils.py`** — Shared vLLM batch inference helpers. Contains `build_prefill(encoding, text, prompt_prefix, reasoning_effort, identity_prompt)` for building openai_harmony prefill dicts, `extract_final_texts(outputs, encoding)` for parsing the 'final' channel from vLLM outputs, and `run_batch_inference(...)` for batched inference with dedup, resume, and per-batch file output. Used by `summarize_documents.py`, `summarize_clusters.py`, and `summarize_changes.py`.
 
 **`src/text_utils.py`** — Shared library. Contains `split_into_chunks(text, max_chars)` which splits text at sentence boundaries with a fallback to newline splits.
 

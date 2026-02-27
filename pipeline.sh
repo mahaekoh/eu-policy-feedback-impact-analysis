@@ -103,6 +103,11 @@ run_remote() {
 
 rsync_to_remote() {
     local local_path="$1" remote_path="$2"
+    if [[ "$remote_path" == */ ]]; then
+        $SSH_CMD "mkdir -p ${REMOTE_DIR}/${remote_path}"
+    else
+        $SSH_CMD "mkdir -p $(dirname "${REMOTE_DIR}/${remote_path}")"
+    fi
     rsync -avz -e "ssh -i ${SSH_KEY}" \
         "$local_path" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}"
 }
@@ -159,7 +164,7 @@ do_repair() {
 do_find_short_pdfs() {
     run_local "find short PDF extractions" \
         $PYTHON src/find_short_pdf_extractions.py \
-            -i data/scrape/initiative_details \
+            data/scrape/initiative_details \
             -o data/ocr/ "$@"
 }
 
@@ -221,18 +226,10 @@ do_cluster() {
 
 do_deploy() {
     stage_start "deploy code to remote"
+    $SSH_CMD "mkdir -p ${REMOTE_DIR}/src"
     rsync -avz \
-        --exclude='.git/' \
-        --exclude='data/' \
-        --exclude='__pycache__/' \
-        --exclude='.venv/' \
-        --exclude='.idea/' \
-        --exclude='*.pyc' \
-        --exclude='.DS_Store' \
-        --exclude='*.ipynb' \
-        --exclude='pipeline.conf' \
         -e "ssh -i ${SSH_KEY}" \
-        "${SCRIPT_DIR}/" "${REMOTE_HOST}:${REMOTE_DIR}/"
+        "${SCRIPT_DIR}/src/" "${REMOTE_HOST}:${REMOTE_DIR}/src/"
     stage_end "deploy code to remote"
 }
 
@@ -314,16 +311,22 @@ do_pull() {
             rsync_from_remote data/cluster_summaries/ data/cluster_summaries/
             stage_end "pull cluster summaries"
             ;;
+        change-summaries)
+            stage_start "pull change summaries"
+            rsync_from_remote data/analysis/change_summaries/ data/analysis/change_summaries/
+            stage_end "pull change summaries"
+            ;;
         all)
             do_pull ocr
             do_pull translation
             do_pull summaries
             do_pull classification
             do_pull cluster-summaries
+            do_pull change-summaries
             ;;
         *)
             echo "ERROR: Unknown pull target: $target"
-            echo "Valid targets: ocr, translation, summaries, classification, cluster-summaries, all"
+            echo "Valid targets: ocr, translation, summaries, classification, cluster-summaries, change-summaries, all"
             exit 1
             ;;
     esac
@@ -371,9 +374,15 @@ do_remote() {
                         -o "$summary_dir" "$@"
             done
             ;;
+        summarize-changes)
+            run_remote "summarize-changes" \
+                $PYTHON src/summarize_changes.py \
+                    data/analysis/unit_summaries/ \
+                    -o data/analysis/change_summaries/ "$@"
+            ;;
         *)
             echo "ERROR: Unknown remote step: $step"
-            echo "Valid steps: ocr, translate, summarize, classify, summarize-clusters"
+            echo "Valid steps: ocr, translate, summarize, classify, summarize-clusters, summarize-changes"
             exit 1
             ;;
     esac
@@ -420,6 +429,10 @@ do_full() {
     do_remote summarize-clusters "$@"
     do_pull cluster-summaries
 
+    # Remote change summarization -> pull
+    do_remote summarize-changes "$@"
+    do_pull change-summaries
+
     echo ""
     echo "============================================================"
     echo "[$(timestamp)] FULL PIPELINE COMPLETE"
@@ -453,7 +466,7 @@ do_logs() {
                 $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
             fi
             ;;
-        ocr|translate|summarize|classify|summarize-clusters)
+        ocr|translate|summarize|classify|summarize-clusters|summarize-changes)
             local pattern
             pattern="$(echo "$target" | tr ' ()' '_')"
             echo "Tailing most recent '$target' log..."
@@ -461,7 +474,7 @@ do_logs() {
             $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
             ;;
         *)
-            echo "Usage: pipeline.sh logs [list|tail [step]|ocr|translate|summarize|classify|summarize-clusters]"
+            echo "Usage: pipeline.sh logs [list|tail [step]|ocr|translate|summarize|classify|summarize-clusters|summarize-changes]"
             exit 1
             ;;
     esac
@@ -487,10 +500,10 @@ Available stages:
   Deploy / sync:
     deploy            Rsync code to remote
     push <target>     Push data to remote (ocr|translation|analysis|unit-summaries|clustering|all)
-    pull <target>     Pull results from remote (ocr|translation|summaries|classification|cluster-summaries|all)
+    pull <target>     Pull results from remote (ocr|translation|summaries|classification|cluster-summaries|change-summaries|all)
 
   Remote execution:
-    remote <step>     Run step on remote (ocr|translate|summarize|classify|summarize-clusters)
+    remote <step>     Run step on remote (ocr|translate|summarize|classify|summarize-clusters|summarize-changes)
 
   Logs:
     logs              List recent remote logs

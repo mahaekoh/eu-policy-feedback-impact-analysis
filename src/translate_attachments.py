@@ -125,8 +125,8 @@ def main():
         help=f"Max chars per chunk before splitting (default: {CHUNK_SIZE}).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Number of prompts per inference batch (default: 32).",
+        "--batch-size", type=int, default=4096,
+        help="Number of prompts per inference batch (default: 4096).",
     )
     args = parser.parse_args()
 
@@ -137,10 +137,8 @@ def main():
     encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
     reasoning_effort = ReasoningEffort.MEDIUM
 
-    # Build chunks and prompts
-    # Each prompt maps back to (record_index, chunk_index_within_record)
-    prompts = []        # list of {"prompt_token_ids": [...]}
-    chunk_texts = []    # raw chunk texts for logging
+    # Build chunk index (no tokenization yet — that happens per-batch)
+    chunk_texts = []    # raw chunk texts
     prompt_map = []     # list of (record_index, chunk_index)
     record_chunk_counts = {}  # record_index -> number of chunks
 
@@ -151,41 +149,35 @@ def main():
         chunks = split_into_chunks(text.strip(), args.chunk_size)
         record_chunk_counts[i] = len(chunks)
         for ci, chunk in enumerate(chunks):
-            prefill = build_prefill(encoding, chunk, reasoning_effort)
-            if prefill is None:
-                print(f"  WARNING: skipping chunk {ci}/{len(chunks)} for record {i} "
-                      f"(initiative {rec.get('initiative_id','?')}, "
-                      f"fb {rec.get('feedback_id','?')}, "
-                      f"att {rec.get('attachment_id','?')}): encoding failed")
-                continue
-            prompts.append(prefill)
             chunk_texts.append(chunk)
             prompt_map.append((i, ci))
 
     total = len(records)
     n_records_with_text = len(record_chunk_counts)
-    n_prompts = len(prompts)
+    n_entries = len(chunk_texts)
     n_chunked = sum(1 for c in record_chunk_counts.values() if c > 1)
     print(f"Records: {total} total, {n_records_with_text} with text, {total - n_records_with_text} without text")
     chunk_lens = [len(ct) for ct in chunk_texts]
-    print(f"Prompts: {n_prompts} ({n_chunked} records were split into multiple chunks)")
-    print(f"Chunk sizes: min={min(chunk_lens)}, max={max(chunk_lens)}, "
-          f"avg={sum(chunk_lens) // len(chunk_lens)}, total={sum(chunk_lens)}")
+    print(f"Chunks: {n_entries} ({n_chunked} records were split into multiple chunks)")
+    if chunk_lens:
+        print(f"Chunk sizes: min={min(chunk_lens)}, max={max(chunk_lens)}, "
+              f"avg={sum(chunk_lens) // len(chunk_lens)}, total={sum(chunk_lens)}")
 
     # Log the largest chunks
-    top_n = min(10, n_prompts)
-    indices_by_size = sorted(range(n_prompts), key=lambda i: chunk_lens[i], reverse=True)
-    print(f"Top {top_n} largest chunks:")
-    for rank, pi in enumerate(indices_by_size[:top_n]):
-        rec_idx, chunk_idx = prompt_map[pi]
-        rec = records[rec_idx]
-        print(f"  {rank+1}. {chunk_lens[pi]} chars — "
-              f"initiative {rec.get('initiative_id','?')}, "
-              f"fb {rec.get('feedback_id','?')}, "
-              f"chunk {chunk_idx}/{record_chunk_counts[rec_idx]}, "
-              f"{rec.get('filename','?')}")
+    if chunk_lens:
+        top_n = min(10, n_entries)
+        indices_by_size = sorted(range(n_entries), key=lambda i: chunk_lens[i], reverse=True)
+        print(f"Top {top_n} largest chunks:")
+        for rank, pi in enumerate(indices_by_size[:top_n]):
+            rec_idx, chunk_idx = prompt_map[pi]
+            rec = records[rec_idx]
+            print(f"  {rank+1}. {chunk_lens[pi]} chars — "
+                  f"initiative {rec.get('initiative_id','?')}, "
+                  f"fb {rec.get('feedback_id','?')}, "
+                  f"chunk {chunk_idx}/{record_chunk_counts[rec_idx]}, "
+                  f"{rec.get('filename','?')}")
 
-    if n_prompts == 0:
+    if n_entries == 0:
         print("Nothing to translate.")
         for rec in records:
             rec["extracted_text_translated"] = None
@@ -229,7 +221,7 @@ def main():
     # Run batch inference, writing a file after each batch
     # translation_cache: chunk_text -> translation (dedup identical texts)
     translation_cache = {}
-    print(f"Running inference on {n_prompts} prompts...")
+    print(f"Running inference on {n_entries} chunks...")
     t_start = time.time()
     translated_chunks = {}  # record_index -> {chunk_index: text}
     failed_prompts = []     # prompts that failed extraction, for retry
@@ -237,8 +229,8 @@ def main():
     skipped_batches = 0
     dedup_total = 0
 
-    for batch_start in range(0, n_prompts, args.batch_size):
-        batch_end = min(batch_start + args.batch_size, n_prompts)
+    for batch_start in range(0, n_entries, args.batch_size):
+        batch_end = min(batch_start + args.batch_size, n_entries)
         batch_file = os.path.join(batch_dir, f"batch_{batch_num:04d}{output_ext}")
 
         # If batch file already exists, load results from it instead of re-running
@@ -257,11 +249,11 @@ def main():
                 if result is not None and ct not in translation_cache:
                     translation_cache[ct] = result
             skipped_batches += 1
-            print(f"  Batch [{batch_start+1}-{batch_end}/{n_prompts}]: loaded from {batch_file} ({len(cached_results)} results)")
+            print(f"  Batch [{batch_start+1}-{batch_end}/{n_entries}]: loaded from {batch_file} ({len(cached_results)} results)")
             batch_num += 1
             continue
 
-        # Separate prompts into those needing inference vs cached/intra-batch duplicates
+        # Tokenize this batch and separate into inference vs cached/intra-batch duplicates
         infer_indices = []   # prompt indices that need inference
         infer_prompts = []
         infer_seen = {}      # chunk_text -> index in infer_indices (first occurrence)
@@ -280,16 +272,26 @@ def main():
                 dedup_indices.append(j)
                 dedup_count += 1
             else:
+                prefill = build_prefill(encoding, ct, reasoning_effort)
+                if prefill is None:
+                    rec_idx, chunk_idx = prompt_map[j]
+                    rec = records[rec_idx]
+                    print(f"  WARNING: skipping chunk {chunk_idx}/{record_chunk_counts[rec_idx]} "
+                          f"for record {rec_idx} "
+                          f"(initiative {rec.get('initiative_id','?')}, "
+                          f"fb {rec.get('feedback_id','?')}, "
+                          f"att {rec.get('attachment_id','?')}): encoding failed")
+                    continue
                 infer_seen[ct] = len(infer_indices)
                 infer_indices.append(j)
-                infer_prompts.append(prompts[j])
+                infer_prompts.append(prefill)
 
         dedup_total += dedup_count
         dedup_set = set(dedup_indices)
         batch_sizes = [chunk_lens[i] for i in range(batch_start, batch_end)]
 
         # Log IDs for each prompt in the batch
-        print(f"  Batch [{batch_start+1}-{batch_end}/{n_prompts}]"
+        print(f"  Batch [{batch_start+1}-{batch_end}/{n_entries}]"
               f"{f' ({dedup_count} deduped, {len(infer_prompts)} to infer)' if dedup_count else ''}:")
         for j in range(batch_start, batch_end):
             rec_idx, chunk_idx = prompt_map[j]
@@ -395,14 +397,14 @@ def main():
         rec_sample = records[rec_idx_sample]
         error_note = f", {batch_errors} FAILED" if batch_errors else ""
         dedup_note = f", {dedup_count} deduped" if dedup_count else ""
-        print(f"  [{batch_end}/{n_prompts}] batch of {batch_end - batch_start} done in {elapsed:.1f}s "
+        print(f"  [{batch_end}/{n_entries}] batch of {batch_end - batch_start} done in {elapsed:.1f}s "
               f"(input: {min(batch_sizes)}-{max(batch_sizes)} chars{dedup_note}{error_note}, "
               f"e.g. initiative {rec_sample.get('initiative_id','?')})")
         print(f"  Wrote {batch_file}")
         batch_num += 1
 
     total_elapsed = time.time() - t_start
-    print(f"Inference done in {total_elapsed:.1f}s ({total_elapsed / n_prompts:.2f}s per prompt)")
+    print(f"Inference done in {total_elapsed:.1f}s ({total_elapsed / n_entries:.2f}s per prompt)")
     if skipped_batches:
         print(f"  ({skipped_batches} batches loaded from existing files)")
     if dedup_total:
