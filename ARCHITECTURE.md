@@ -514,9 +514,19 @@ The pipeline is orchestrated by `pipeline.sh`. First, copy `pipeline.conf.exampl
 ./pipeline.sh pull ocr                 # pull OCR results back
 ./pipeline.sh merge-ocr                # merge OCR into initiative_details
 
+# Monitor remote jobs
+./pipeline.sh logs                     # list recent remote logs
+./pipeline.sh logs tail                # tail most recent log
+./pipeline.sh logs tail summarize      # tail most recent summarize log
+./pipeline.sh logs ocr                 # shorthand for logs tail ocr
+
 # See all available stages
 ./pipeline.sh list
 ```
+
+### SSH resilience
+
+Remote commands (`./pipeline.sh remote <step>`) run via `nohup` on the remote host with stdout/stderr captured to timestamped log files under `logs/`. This ensures long-running GPU jobs (OCR, translation, summarization) survive SSH disconnects. The local terminal tails the remote log in real-time and polls for a status file to detect completion. If the SSH session drops, the remote process continues — reconnect and use `./pipeline.sh logs` to monitor progress.
 
 The `full` pipeline runs in this order:
 

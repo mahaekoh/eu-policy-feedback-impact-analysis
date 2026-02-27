@@ -61,6 +61,14 @@ The `build_unit_summaries.py` script consolidates individual document and attach
 - **`after_feedback_summary`** — concatenation of all document summaries from after feedback
 - **`combined_feedback_summary`** — on each feedback item: the free-text comment plus all attachment summaries, concatenated
 
+### Feedback clustering (`data/clustering/<scheme>/*.json`)
+
+Feedback is clustered across initiatives using sentence embeddings. Each clustering scheme (algorithm + model + parameters) produces its own subdirectory. Multiple schemes can be configured in `pipeline.conf`.
+
+### Cluster summaries (`data/cluster_summaries/<scheme>/*.json`)
+
+AI-generated summaries of each feedback cluster, produced by a 120-billion-parameter language model.
+
 ### Interactive viewer (`viewer.html`)
 
 A standalone HTML file (no dependencies) for browsing per-initiative JSON files in the browser. Supports tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll for large feedback lists.
@@ -134,7 +142,7 @@ The output files are standard JSON. You can explore them with:
 
 ## Running the Pipeline
 
-The pipeline is orchestrated by `pipeline.sh`. See `./pipeline.sh list` for all stages, or run `./pipeline.sh full` for the complete end-to-end pipeline.
+The pipeline is orchestrated by `pipeline.sh`. See `./pipeline.sh list` for all stages, or run `./pipeline.sh full` for the complete end-to-end pipeline. Remote GPU jobs run via `nohup` to survive SSH disconnects — use `./pipeline.sh logs` to monitor them.
 
 ## Technical Details
 

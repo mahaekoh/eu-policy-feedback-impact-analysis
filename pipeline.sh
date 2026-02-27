@@ -59,9 +59,45 @@ run_local() {
 
 run_remote() {
     local name="$1"; shift
+    local log_name
+    log_name="$(echo "$name" | tr ' ()' '_')"
+    local log_file="logs/${log_name}_$(date +%Y%m%d_%H%M%S).log"
+    local status_file="${log_file}.exit"
     stage_start "remote $name"
+
+    # Launch via nohup so SSH disconnects don't kill the process.
+    # The wrapper runs the command, captures its exit code to a status file,
+    # then exits. We get the wrapper's PID back.
+    local remote_cmd="$*"
     # shellcheck disable=SC2029
-    $SSH_CMD "cd ${REMOTE_DIR} && $*"
+    local remote_pid
+    remote_pid=$($SSH_CMD "cd ${REMOTE_DIR} && mkdir -p logs \
+        && nohup bash -c '${remote_cmd} > ${log_file} 2>&1; echo \$? > ${status_file}' \
+           </dev/null >/dev/null 2>&1 & echo \$!")
+    echo "Remote PID: ${remote_pid}, log: ${REMOTE_DIR}/${log_file}"
+
+    # Tail the log locally until the remote process exits.
+    # Poll for the status file since --pid doesn't work across SSH sessions.
+    # shellcheck disable=SC2029
+    $SSH_CMD "tail -f ${REMOTE_DIR}/${log_file} &
+        TAIL_PID=\$!
+        while [ ! -f ${REMOTE_DIR}/${status_file} ]; do sleep 2; done
+        sleep 1
+        kill \$TAIL_PID 2>/dev/null
+        wait \$TAIL_PID 2>/dev/null" || true
+
+    # Read exit code from status file
+    # shellcheck disable=SC2029
+    local exit_code
+    exit_code=$($SSH_CMD "cat ${REMOTE_DIR}/${status_file} 2>/dev/null || echo 1")
+    exit_code=$(echo "$exit_code" | tr -d '[:space:]')
+
+    if [ "$exit_code" != "0" ]; then
+        echo "ERROR: remote $name exited with code ${exit_code}"
+        echo "Full log: ${REMOTE_HOST}:${REMOTE_DIR}/${log_file}"
+        return 1
+    fi
+
     stage_end "remote $name"
 }
 
@@ -390,6 +426,47 @@ do_full() {
     echo "============================================================"
 }
 
+# ── Log tailing ──────────────────────────────────────────────────────────────
+
+do_logs() {
+    local target="${1:-list}"
+    shift 2>/dev/null || true
+    case "$target" in
+        list)
+            echo "Remote logs:"
+            # shellcheck disable=SC2029
+            $SSH_CMD "ls -lt ${REMOTE_DIR}/logs/*.log 2>/dev/null | head -20" || echo "  (no logs)"
+            ;;
+        tail)
+            local step="${1:-}"
+            if [ -z "$step" ]; then
+                # Tail the most recent log
+                echo "Tailing most recent remote log..."
+                # shellcheck disable=SC2029
+                $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/*.log 2>/dev/null | head -1)"
+            else
+                # Tail the most recent log matching the step name
+                local pattern
+                pattern="$(echo "$step" | tr ' ()' '_')"
+                echo "Tailing most recent '$step' log..."
+                # shellcheck disable=SC2029
+                $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
+            fi
+            ;;
+        ocr|translate|summarize|classify|summarize-clusters)
+            local pattern
+            pattern="$(echo "$target" | tr ' ()' '_')"
+            echo "Tailing most recent '$target' log..."
+            # shellcheck disable=SC2029
+            $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
+            ;;
+        *)
+            echo "Usage: pipeline.sh logs [list|tail [step]|ocr|translate|summarize|classify|summarize-clusters]"
+            exit 1
+            ;;
+    esac
+}
+
 # ── Stage listing ────────────────────────────────────────────────────────────
 
 do_list() {
@@ -414,6 +491,11 @@ Available stages:
 
   Remote execution:
     remote <step>     Run step on remote (ocr|translate|summarize|classify|summarize-clusters)
+
+  Logs:
+    logs              List recent remote logs
+    logs tail [step]  Tail most recent log (optionally filtered by step name)
+    logs <step>       Tail most recent log for a step (ocr|translate|summarize|classify|summarize-clusters)
 
   Composite:
     full              Full pipeline in dependency order
@@ -442,6 +524,7 @@ case "$STAGE" in
     push)               do_push "$@" ;;
     pull)               do_pull "$@" ;;
     remote)             do_remote "$@" ;;
+    logs)               do_logs "$@" ;;
     full)               do_full "$@" ;;
     *)
         echo "ERROR: Unknown stage: $STAGE"

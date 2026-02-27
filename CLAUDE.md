@@ -80,7 +80,11 @@ merge_translations.py             → updates data/repair/repaired_details/*.jso
 ./pipeline.sh deploy                   # rsync code to remote
 ./pipeline.sh remote summarize         # run summarize on remote GPU
 ./pipeline.sh pull summaries           # rsync results back
+./pipeline.sh logs                     # list recent remote logs
+./pipeline.sh logs tail summarize      # tail a specific step's log
 ```
+
+Remote commands run via `nohup` with stdout/stderr piped to log files under `logs/` on the remote host. This ensures long-running GPU jobs survive SSH disconnects. The local terminal tails the log in real-time and reads the exit code from a status file when the job completes.
 
 ## Scripts
 
@@ -121,6 +125,14 @@ merge_translations.py             → updates data/repair/repaired_details/*.jso
 **`src/summarize_documents.py`** — Summarizes publication documents and feedback attachments using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes the output of `initiative_stats.py -o`. Long texts are split into chunks at sentence boundaries (default 5000 chars), each chunk is summarized (pass 1), then multi-chunk summaries are recursively combined in groups of up to `--max-combine-chunks` (default 4) until a single summary remains. Both documents and feedback attachments are summarized into up to 10 paragraphs per chunk, and combined summaries are also up to 10 paragraphs. Adds `summary` field to each document and attachment object. Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Within a run, per-batch result files in `_batches_pass1/group_NNNN/` and `_batches_pass2/group_NNNN/` provide crash recovery for incomplete groups.
 
 **`src/build_unit_summaries.py`** — Consolidates individual document and attachment summaries into per-initiative unified summary fields. Takes the output of `summarize_documents.py`. Adds `before_feedback_summary` (concatenation of document summaries from before feedback), `after_feedback_summary` (from after feedback), and `combined_feedback_summary` (feedback text + attachment summaries) on each middle feedback item. All concatenation joins on `\n\n`.
+
+### Clustering & classification
+
+**`src/cluster_all_initiatives.py`** — Clusters feedback across initiatives using sentence embeddings. Supports agglomerative and HDBSCAN algorithms with configurable parameters. Reads from `data/analysis/unit_summaries/`, writes per-scheme output to `data/clustering/<scheme>/`. Scheme names encode the algorithm, model, and parameters (e.g. `agglomerative_google_embeddinggemma-300m_distance_threshold=0.75_...`).
+
+**`src/classify_initiative_and_feedback.py`** — Classifies initiatives and their feedback using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes unit summaries as input, writes per-initiative classification JSONs to `data/classification/`.
+
+**`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`.
 
 ### Repair pipeline
 
