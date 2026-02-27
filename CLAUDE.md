@@ -141,6 +141,28 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 **`src/repair_broken_attachments.py`** — Scans `data/scrape/initiative_details/` for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the format-specific pipeline. Writes updated initiative JSON copies to a specified output directory (only files with at least one successful repair). Also writes `repair_report.json` — a machine-readable list of all repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, which can be passed as `-r` to downstream scripts to scope them to just the repaired attachments. Supports `-f` for initiative ID whitelist filter, `-w` for worker count (default 20), `--dry-run` for scanning without repairing. Adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments for traceability.
 
+### Webapp
+
+A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback interactively. See `webapp/AUTH.md` for Google sign-in setup.
+
+**Tech stack:** Next.js 16.1.6, React 19, Tailwind CSS 4, shadcn/ui (Radix + Lucide), next-auth v5 (Google OAuth, JWT sessions).
+
+**Pages:**
+- `/` — Initiative index with search, sort, filters, pagination (50/page). Deduplicates initiatives sharing identical feedback IDs.
+- `/initiative/[id]` — Initiative detail with publications view (documents + feedback) and cluster view. Empty/disabled publications shown as compact links.
+
+**API routes:**
+- `/api/auth/[...nextauth]` — NextAuth OAuth handlers
+- `/api/clusters/[id]` — Fetch clustering data for an initiative by scheme
+
+**Key lib files:**
+- `src/lib/data.ts` — Server-side data loading from `../data/`. Uses regex extraction (not JSON parsing) for fast index builds. 5-minute cache TTL.
+- `src/lib/types.ts` — TypeScript interfaces for Initiative, Publication, Feedback, Attachment, ClusterData, etc.
+- `src/auth.ts` — Auth.js config with Google provider
+- `src/proxy.ts` — Session cookie refresh (Next.js 16 middleware proxy)
+
+**Running:** `cd webapp && npm run dev` (reads data from `../data/scrape/initiative_details/` and `../data/clustering/`).
+
 ### Viewer
 
 **`viewers/viewer.html`** — Standalone HTML file (no dependencies) for interactively browsing per-initiative JSON files in the browser. Supports file loading via browser file picker. Shows initiative metadata, tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), document download links, feedback portal links, attachment download links, expandable text blocks (summaries, extracted text, pre-translation/pre-OCR originals), user type color coding, feedback filtering by type/search/empty, and chunked infinite scroll for large feedback lists.

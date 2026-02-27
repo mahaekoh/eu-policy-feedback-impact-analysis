@@ -73,7 +73,23 @@ Feedback is clustered across initiatives using sentence embeddings. Each cluster
 
 AI-generated summaries of each feedback cluster, produced by a 120-billion-parameter language model.
 
-### Interactive viewer (`viewers/viewer.html`)
+### Web application (`webapp/`)
+
+A Next.js web application for browsing all initiatives and their feedback interactively. Features include:
+
+- **Initiative index** with full-text search, sorting (most discussed, recently discussed, newest), filtering by stage/department/topic/policy area, and pagination
+- **Initiative detail** with expandable publication sections showing documents and feedback, AI-generated summaries (document, change, before/after), and clustered feedback visualization
+- **Feedback exploration** with user type color coding, country flags, filtering by type/search/empty attachments, and infinite scroll
+- **Cluster view** with multiple clustering scheme support, nested cluster trees, and per-cluster statistics
+- **Optional Google sign-in** via Auth.js (the app is fully accessible without signing in)
+
+```bash
+cd webapp && npm install && npm run dev
+```
+
+The app reads data directly from the `data/` directory — no separate database or import step needed.
+
+### Standalone viewer (`viewers/viewer.html`)
 
 A standalone HTML file (no dependencies) for browsing per-initiative JSON files in the browser. Supports tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll for large feedback lists.
 

@@ -355,7 +355,91 @@ python3 src/summarize_changes.py data/analysis/unit_summaries/ \
 - **Output**: initiative JSONs with `change_summary` field added at top level
 - **Deduplication + resume**: same as other inference scripts (cross-batch cache, batch file resume)
 
-### Viewer
+### Webapp (`webapp/`)
+
+A Next.js web application for browsing initiatives and feedback interactively.
+
+#### Tech stack
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| Next.js | 16.1.6 | App framework (App Router, server components) |
+| React | 19.2.3 | UI rendering |
+| Tailwind CSS | 4 | Styling (via `@tailwindcss/postcss`) |
+| shadcn/ui | — | Component library (Radix UI + Lucide icons + CVA) |
+| next-auth | 5.0.0-beta.30 | Google OAuth (JWT sessions, no database) |
+| react-markdown | 10.1.0 | Markdown rendering for summaries |
+
+#### Pages
+
+| Route | File | Description |
+|-------|------|-------------|
+| `/` | `src/app/page.tsx` | Initiative index with search, sort, advanced filters, pagination (50/page) |
+| `/initiative/[id]` | `src/app/initiative/[id]/page.tsx` | Initiative detail with publications/clusters views, summaries, timeline sparkline |
+
+#### API routes
+
+| Route | File | Description |
+|-------|------|-------------|
+| `/api/auth/[...nextauth]` | `src/app/api/auth/[...nextauth]/route.ts` | NextAuth OAuth handlers (Google sign-in/out) |
+| `/api/clusters/[id]` | `src/app/api/clusters/[id]/route.ts` | Fetch clustering data for an initiative (requires `scheme` query param) |
+
+#### Data loading (`src/lib/data.ts`)
+
+All data is loaded server-side from `../data/` (relative to `webapp/`):
+
+- **`getInitiativeIndex()`** — Reads all initiative JSON files and extracts metadata using regex (not full JSON parsing) for speed. Extracts feedback IDs to deduplicate initiatives that share identical feedback sets (different policy steps referencing the same consultation). Results are cached for 5 minutes.
+- **`getInitiativeDetail(id)`** — Full JSON parse of a single initiative file.
+- **`getClusteringSchemesForInitiative(id)`** — Scans `data/clustering/` subdirectories for files matching the initiative ID.
+- **`getClusterData(id, scheme)`** — Loads cluster assignments for a specific scheme.
+
+#### Components
+
+**Layout:**
+- `header.tsx` — Sticky nav bar with app title and user menu
+- `user-menu.tsx` — Client component: Google sign-in button when unauthenticated, avatar + name + sign-out when authenticated
+
+**Index page:**
+- `initiative-list.tsx` — Client component with search, sort (most discussed / recently discussed / newest), advanced filters (stage, department, topic, policy area, open feedback only), and paginated card grid
+- `initiative-card.tsx` — Card showing title, department badge, stage, feedback count, timeline sparkline, country/user-type distribution bars
+
+**Detail page:**
+- `initiative-detail.tsx` — Main detail view with metadata panel, summaries (document, change, before/after), and tabbed publications/clusters views. Filters out empty disabled publications into a compact summary row.
+- `publication-section.tsx` — Expandable publication with document and feedback tabs
+- `feedback-list.tsx` — Filterable feedback list with user-type chips, text search, hide-empty toggle, infinite scroll (50/chunk)
+- `feedback-card.tsx` — Single feedback item with submitter info, text, attachments, extracted/OCR/translated text
+- `document-card.tsx` — Document with metadata, download link, summary, extracted text
+
+**Clustering:**
+- `cluster-view.tsx` — Cluster explorer with scheme selector, sort options, timeline date filter, nested tree
+- `cluster-node.tsx` — Expandable cluster node with item count, country/user-type stats bar, sparkline, feedback items
+- `cluster-stats-bar.tsx` — Horizontal stacked bars for country and user-type distributions with tooltips
+
+**Shared:**
+- `expandable-text.tsx` — Collapsible text block with optional markdown rendering and configurable preview length
+
+#### Authentication
+
+Optional Google sign-in via Auth.js v5. JWT-based sessions — no database required. The app is fully accessible without signing in. See `webapp/AUTH.md` for Google Cloud Console setup and environment variables.
+
+| File | Purpose |
+|------|---------|
+| `src/auth.ts` | NextAuth config with Google provider |
+| `src/proxy.ts` | Re-exports `auth` as `proxy` for Next.js 16 middleware (session cookie refresh) |
+| `.env.local` | `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` (git-ignored) |
+
+#### Running
+
+```bash
+cd webapp
+npm install
+npm run dev    # development server at http://localhost:3000
+npm run build  # production build
+```
+
+The app reads data directly from `../data/scrape/initiative_details/` and `../data/clustering/` — no database or import step needed.
+
+### Standalone viewer
 
 #### `viewers/viewer.html`
 
