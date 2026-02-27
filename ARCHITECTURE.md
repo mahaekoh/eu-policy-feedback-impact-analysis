@@ -218,7 +218,7 @@ python3 src/translate_attachments.py data/translation/non_english_attachments.js
 
 - **Model**: `unsloth/gpt-oss-120b` via vLLM
 - **Prompt encoding**: `openai_harmony` with `ReasoningEffort.MEDIUM`
-- **Chunking**: long texts split at sentence boundaries (default 5,000 chars per chunk via `text_utils.split_into_chunks`)
+- **Chunking**: long texts split at sentence boundaries (default 16,384 chars per chunk via `text_utils.split_into_chunks`)
 - **"NO TRANSLATION NEEDED"**: if the model returns this for a chunk, the original text is preserved for that chunk during reassembly
 - **Deduplication**: identical text chunks across records are translated only once (cross-batch cache)
 - **Resume**: completed batch files are loaded from disk instead of re-running inference
@@ -642,7 +642,7 @@ The detail scraper uses three separate thread pools (initiative, feedback, PDF e
 
 ### Text chunking for LLM inference
 
-Translation and summarization split long texts at sentence boundaries (default 5,000 characters for translation, 16,384 for summarization). The `text_utils.split_into_chunks` function tries `.!?`-followed-by-whitespace splits first, falling back to newline splits if a single sentence exceeds the limit. This keeps semantic units intact while staying within context windows.
+Translation and summarization split long texts at sentence boundaries (default 16,384 characters). The `text_utils.split_into_chunks` function tries `.!?`-followed-by-whitespace splits first, falling back to newline splits if a single sentence exceeds the limit. This keeps semantic units intact while staying within context windows.
 
 ### Recursive summarization
 

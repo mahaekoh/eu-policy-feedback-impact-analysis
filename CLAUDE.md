@@ -96,7 +96,7 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 ### Translation pipeline
 
-**`src/translate_attachments.py`** — Translates non-English feedback attachment texts to English using vLLM batch inference with `unsloth/gpt-oss-120b`. Uses `openai_harmony` for structured prompts with `ReasoningEffort.MEDIUM`. Long documents are chunked at sentence boundaries (default 5000 chars). Chunks returning "NO TRANSLATION NEEDED" are replaced with the original text during reassembly.
+**`src/translate_attachments.py`** — Translates non-English feedback attachment texts to English using vLLM batch inference with `unsloth/gpt-oss-120b`. Uses `openai_harmony` for structured prompts with `ReasoningEffort.MEDIUM`. Long documents are chunked at sentence boundaries (default 16,384 chars). Chunks returning "NO TRANSLATION NEEDED" are replaced with the original text during reassembly.
 
 **`src/merge_translations.py`** — Merges translations back into initiative JSON files. Replaces `extracted_text`, preserves original as `extracted_text_before_translation`. Skips records containing "NO TRANSLATION NEEDED". Supports `--dry-run`.
 

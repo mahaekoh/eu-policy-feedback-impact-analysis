@@ -4,7 +4,7 @@ Takes the JSON output from find_non_english_feedback_attachments.py, translates
 each item's extracted_text using unsloth/gpt-oss-120b, and writes a copy of
 the JSON with extracted_text_translated added.
 
-Long documents (>5000 chars) are split at sentence boundaries into chunks,
+Long documents (>16384 chars) are split at sentence boundaries into chunks,
 translated separately, and reassembled.
 
 Usage:
@@ -35,7 +35,7 @@ from text_utils import split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
-CHUNK_SIZE = 5000
+CHUNK_SIZE = 16384
 
 
 IDENTITY_PROMPT = "You are a professional translator. You translate text to English accurately and faithfully."
