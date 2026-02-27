@@ -156,11 +156,6 @@ do_scrape() {
         $PYTHON src/scrape_eu_initiative_details.py "$@"
 }
 
-do_repair() {
-    run_local "repair broken attachments" \
-        $PYTHON src/repair_broken_attachments.py -o data/repair/ "$@"
-}
-
 do_find_short_pdfs() {
     run_local "find short PDF extractions" \
         $PYTHON src/find_short_pdf_extractions.py \
@@ -513,7 +508,6 @@ Full pipeline (./pipeline.sh full):
   24  pull change-summaries     Pull change summaries back
 
 Other commands:
-  repair              Repair broken attachments (separate from full pipeline)
   remote classify     Run GPU classification on remote
   pull classification Pull classification results back
   logs                List recent remote logs
@@ -531,7 +525,6 @@ shift
 case "$STAGE" in
     list)               do_list ;;
     scrape)             do_scrape "$@" ;;
-    repair)             do_repair "$@" ;;
     find-short-pdfs)    do_find_short_pdfs "$@" ;;
     find-nonenglish)    do_find_nonenglish "$@" ;;
     merge-ocr)          do_merge_ocr "$@" ;;

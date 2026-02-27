@@ -143,25 +143,7 @@ python3 src/scrape_eu_initiative_details.py 12970
 - **Resume**: skips initiative IDs that already have a JSON file in the output directory
 - **Output**: one JSON file per initiative in `data/scrape/initiative_details/`
 
-### Stage 2: Repair (optional, manual recovery only)
-
-#### `repair_broken_attachments.py`
-
-Scans initiative detail files for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. This is largely redundant with the retry passes built into `scrape_eu_initiative_details.py` (`_retry_extraction_errors()` and `_fix_pdf_as_text()`), but can be useful for recovering from transient network failures after a scrape completes.
-
-```bash
-# Scan and report (dry run)
-python3 src/repair_broken_attachments.py -o data/repair/ --dry-run
-
-# Repair all
-python3 src/repair_broken_attachments.py -o data/repair/
-```
-
-- **Strategy**: for `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the native format-specific pipeline
-- **Output**: copies of initiative JSONs (only files with at least one repair) to the output directory, plus `repair_report.json`
-- **Not in the main pipeline**: `pipeline.sh full` does not include this stage. Run it manually with `./pipeline.sh repair` if needed.
-
-### Stage 3: Data Enrichment (OCR)
+### Stage 2: Data Enrichment (OCR)
 
 #### `find_short_pdf_extractions.py`
 
@@ -206,7 +188,7 @@ python3 src/merge_ocr_results.py data/ocr/short_pdf_report_ocr.json data/scrape/
 - **Behavior**: replaces `extracted_text` with OCR result, saves original as `extracted_text_without_ocr`
 - **Lookup**: matches by initiative ID, publication ID, download URL (for documents) or feedback/attachment ID (for feedback attachments)
 
-### Stage 4: Translation
+### Stage 3: Translation
 
 #### `find_non_english_feedback_attachments.py`
 
@@ -263,7 +245,7 @@ python3 src/merge_translations.py data/translation/translation_batches/ data/scr
 - **Input modes**: accepts either the combined JSON file or the batch directory directly
 - **Publication ID resolution**: for older batch formats missing `publication_id`, looks it up from `--input-records` or by searching the initiative files
 
-### Stage 5: Analysis
+### Stage 4: Analysis
 
 #### `initiative_stats.py`
 
@@ -575,8 +557,6 @@ python3 src/print_chunk.py "init=12096 fb=503089 att=6276475 chunk=5/15" data/sc
               "extracted_text_before_translation": "Original non-English text...",
               "extracted_text_without_ocr": "Original pre-OCR text...",
               "extracted_text_error": "Error message if extraction failed...",
-              "repair_method": "pdf-reinterpret or native (if repaired)",
-              "repair_old_error": "Original error before repair...",
               "summary": "..."
             }
           ]
@@ -678,7 +658,7 @@ Translation and summarization pipelines write per-batch result files. On restart
 
 ### PDF-first extraction strategy
 
-Many file uploads on the EU portal have incorrect extensions (e.g. a `.doc` file that is actually a PDF). Both the scraper and repair script handle this by trying PDF extraction first for `.doc/.docx/.odt/.rtf` files. If the PDF extraction produces fewer than 100 characters, it falls back to the native format-specific pipeline. This recovers text from a significant number of attachments that would otherwise fail extraction.
+Many file uploads on the EU portal have incorrect extensions (e.g. a `.doc` file that is actually a PDF). The scraper handles this by trying PDF extraction first for `.doc/.docx/.odt/.rtf` files. If the PDF extraction produces fewer than 100 characters, it falls back to the native format-specific pipeline. This recovers text from a significant number of attachments that would otherwise fail extraction.
 
 ### Publication type mapping
 

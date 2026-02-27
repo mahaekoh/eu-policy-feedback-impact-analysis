@@ -13,9 +13,6 @@ data/
     eu_initiatives_raw.json
     initiative_details/            # Per-initiative JSONs (mutated by merges)
     doc_cache/
-  repair/                          # Repair pipeline output
-    repaired_details/
-    repair_report.json
   ocr/                             # OCR pipeline I/O
     short_pdf_report.json
     pdfs/
@@ -54,20 +51,6 @@ classify_initiative_and_feedback.py → data/classification/*.json
 summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
 ```
 
-### Repair pipeline (re-extracts broken attachments, then re-runs OCR + translation)
-
-```
-repair_broken_attachments.py      → data/repair/repaired_details/*.json + data/repair/repair_report.json
-find_short_pdf_extractions.py -r  → data/ocr/  (scoped to repaired attachments)
-ocr_short_pdfs.py                 → data/ocr/short_pdf_report_ocr.json
-merge_ocr_results.py              → updates data/repair/repaired_details/*.json in-place
-find_non_english_feedback_attachments.py -r → data/translation/non_english_attachments.json  (scoped to repaired)
-translate_attachments.py          → data/translation/non_english_attachments_translated.json
-merge_translations.py             → updates data/repair/repaired_details/*.json in-place
-```
-
-**Important:** When using `-r repair_report.json` with `find_non_english_feedback_attachments.py` or `find_short_pdf_extractions.py`, point the source at the *repaired* output directory (not the original `data/scrape/initiative_details/`), since the repaired JSONs are the ones with the newly extracted text.
-
 ## Pipeline orchestration
 
 `pipeline.sh` orchestrates the full pipeline. Copy `pipeline.conf.example` to `pipeline.conf` and fill in remote host details.
@@ -91,7 +74,7 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 **`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Fetches all pages in parallel (10 workers). Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `-o` for custom output path.
 
-**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Each output JSON includes a `last_cached_at` ISO 8601 timestamp. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments. Supports `--max-age HOURS` (default 48) for incremental updates: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, `repair_method`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age.
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Each output JSON includes a `last_cached_at` ISO 8601 timestamp. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments. Supports `--max-age HOURS` (default 48) for incremental updates: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age.
 
 ### Analysis / reporting
 
@@ -101,9 +84,9 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 **`src/find_missing_extracted_text.py`** — Scans initiative data for publication documents and feedback attachments that have no `extracted_text`.
 
-**`src/find_non_english_feedback_attachments.py`** — Finds feedback attachments where the feedback language is not English. Supports `-o` for JSON output with full metadata, `-f` for initiative ID whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
+**`src/find_non_english_feedback_attachments.py`** — Finds feedback attachments where the feedback language is not English. Supports `-o` for JSON output with full metadata, `-f` for initiative ID whitelist filter.
 
-**`src/find_short_pdf_extractions.py`** — Finds attachments where `extracted_text` is suspiciously short (<100 chars). Checks all attachment types regardless of file extension (since many non-PDF extensions are actually PDFs). Downloads files in parallel (20 workers). Supports `-o` for output directory (writes `{out_dir}/short_pdf_report.json` and downloads PDFs to `{out_dir}/pdfs/`), `-f` for whitelist filter, `-r` for repair report whitelist (only check attachments listed in `repair_report.json`).
+**`src/find_short_pdf_extractions.py`** — Finds attachments where `extracted_text` is suspiciously short (<100 chars). Checks all attachment types regardless of file extension (since many non-PDF extensions are actually PDFs). Downloads files in parallel (20 workers). Supports `-o` for output directory (writes `{out_dir}/short_pdf_report.json` and downloads PDFs to `{out_dir}/pdfs/`), `-f` for whitelist filter.
 
 ### OCR pipeline
 
@@ -134,10 +117,6 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 **`src/classify_initiative_and_feedback.py`** — Classifies initiatives and their feedback using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes unit summaries as input, writes per-initiative classification JSONs to `data/classification/`.
 
 **`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`.
-
-### Repair pipeline
-
-**`src/repair_broken_attachments.py`** — Scans `data/scrape/initiative_details/` for feedback attachments that have `extracted_text_error` and no `extracted_text`, downloads them, and retries extraction. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (since many are mislabeled PDFs), then falls back to the format-specific pipeline. Writes updated initiative JSON copies to a specified output directory (only files with at least one successful repair). Also writes `repair_report.json` — a machine-readable list of all repaired attachments keyed by `(initiative_id, publication_id, feedback_id, attachment_id)`, which can be passed as `-r` to downstream scripts to scope them to just the repaired attachments. Supports `-f` for initiative ID whitelist filter, `-w` for worker count (default 20), `--dry-run` for scanning without repairing. Adds `repair_method` (`"pdf-reinterpret"` or `"native"`) and `repair_old_error` fields to repaired attachments for traceability.
 
 ### Webapp
 

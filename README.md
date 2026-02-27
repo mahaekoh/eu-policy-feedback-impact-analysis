@@ -13,13 +13,12 @@ This project collects the full documentary record needed to investigate that que
 The analysis follows a documentary comparison approach:
 
 1. **Collect** all EU "Have Your Say" initiatives with feedback periods between December 2019 and November 2024 (1,825 initiatives)
-2. **Extract** the full text of every published document and every feedback attachment (PDFs, Word documents, RTF, ODT, plain text)
-3. **Repair** broken text extractions by retrying with alternative extraction strategies (e.g. treating mislabeled files as PDFs)
-4. **Recover** text from scanned or image-based PDFs using optical character recognition (OCR)
-5. **Translate** non-English feedback attachments to English using a large language model
-6. **Identify** the temporal boundary: which documents were published *before* feedback was received, and which came *after*
-7. **Summarize** long documents and feedback attachments using AI to enable qualitative comparison at scale
-8. **Unify** per-initiative summaries into consolidated before/after/feedback summary fields for downstream analysis
+2. **Extract** the full text of every published document and every feedback attachment (PDFs, Word documents, RTF, ODT, plain text), with automatic retries for mislabeled file formats
+3. **Recover** text from scanned or image-based PDFs using optical character recognition (OCR)
+4. **Translate** non-English feedback attachments to English using a large language model
+5. **Identify** the temporal boundary: which documents were published *before* feedback was received, and which came *after*
+6. **Summarize** long documents and feedback attachments using AI to enable qualitative comparison at scale
+7. **Unify** per-initiative summaries into consolidated before/after/feedback summary fields for downstream analysis
 
 A subset of 145 initiatives was selected for detailed before/after analysis. All initiatives with feedback are included, even when no documents were published after the feedback period.
 
