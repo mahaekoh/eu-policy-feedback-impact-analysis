@@ -35,7 +35,7 @@ from text_utils import split_into_chunks
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
 MAX_MODEL_LEN = 32768 * 4
-CHUNK_SIZE = 5000
+CHUNK_SIZE = 16384
 
 IDENTITY_PROMPT = (
     "You are a policy analyst who summarizes EU regulatory documents "
@@ -763,8 +763,8 @@ def main():
         help=f"Max chars per chunk before splitting (default: {CHUNK_SIZE}).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Number of prompts per inference batch (default: 32).",
+        "--batch-size", type=int, default=2048,
+        help="Number of prompts per inference batch (default: 2048).",
     )
     parser.add_argument(
         "--max-combine-chunks", type=int, default=4,
