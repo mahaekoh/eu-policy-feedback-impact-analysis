@@ -777,8 +777,8 @@ def main():
         help=f"Max chars per chunk before splitting (default: {CHUNK_SIZE}).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=2048,
-        help="Number of prompts per inference batch (default: 2048).",
+        "--batch-size", type=int, default=8192,
+        help="Number of prompts per inference batch (default: 8192).",
     )
     parser.add_argument(
         "--combine-budget", type=int, default=COMBINE_BUDGET,
