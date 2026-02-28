@@ -285,7 +285,7 @@ python3 src/summarize_documents.py data/analysis/before_after/ \
 - **Model**: `unsloth/gpt-oss-120b` via vLLM
 - **Recursive summarization**:
   - **Pass 1**: each text chunk is summarized independently
-  - **Combine**: for multi-chunk items, chunk summaries are recursively combined in groups of up to `--max-combine-chunks` (default 4) until a single summary remains
+  - **Combine**: for multi-chunk items, chunk summaries are recursively combined using a character budget (`--combine-budget`, default 65,536) until a single summary remains
 - **Prompt structure**:
   - System identity: "You are a policy analyst who summarizes EU regulatory documents clearly and concisely"
   - Pass 1 (chunk summarization):
@@ -351,7 +351,7 @@ python3 src/summarize_clusters.py data/clustering/<scheme>/ \
 - **Three phases**:
   1. **Policy summary** — concatenates all publication document texts, chunks and summarizes them into a single titled summary
   2. **Feedback summaries** — summarizes each feedback item (free-text comment + attachment texts) into a titled summary; chunking and recursive combining for long items
-  3. **Cluster summaries** — bottom-up recursive combining of feedback summaries by cluster hierarchy; at each depth level, child summaries are grouped into batches of `--max-combine-chunks` (default 4) and combined, repeating until each cluster has a single titled summary
+  3. **Cluster summaries** — bottom-up recursive combining of feedback summaries by cluster hierarchy; at each depth level, child summaries are greedily packed within a character budget (`--combine-budget`, default 65,536) and combined, repeating until each cluster has a single titled summary
 - **Prompt structure**:
   - All summaries produce a title on the first line, blank line, then up to 10 paragraphs
   - Policy prompts focus on objectives, scope, key measures, and regulatory approach
@@ -672,7 +672,7 @@ Translation and summarization split long texts at sentence boundaries (default 1
 
 ### Recursive summarization
 
-For documents spanning multiple chunks, pass 1 summarizes each chunk independently, then chunk summaries are recursively combined in groups of up to 4 (configurable via `--max-combine-chunks`) until a single summary remains. This avoids context window overflow while maintaining global coherence, even for very long documents with many chunks.
+For documents spanning multiple chunks, pass 1 summarizes each chunk independently, then chunk summaries are recursively combined by greedily packing as many as fit within a character budget (`--combine-budget`, default 65,536) until a single summary remains. This avoids context window overflow while maintaining global coherence, even for very long documents with many chunks.
 
 ### In-place merge pattern
 
