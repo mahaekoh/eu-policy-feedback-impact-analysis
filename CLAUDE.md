@@ -29,6 +29,9 @@ data/
   clustering/                      # Clustering output (per-scheme subdirs)
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
+  webapp/                          # Pre-computed webapp data
+    initiative_index.json          # Pre-built initiative index
+    initiative_details/            # Stripped copies (no attachment extracted_text)
 ```
 
 ## Data flow
@@ -49,6 +52,7 @@ summarize_changes.py              → data/analysis/change_summaries/*.json
 cluster_all_initiatives.py        → data/clustering/<scheme>/*.json
 classify_initiative_and_feedback.py → data/classification/*.json
 summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
+build_webapp_index.py             → data/webapp/initiative_index.json + data/webapp/initiative_details/
 ```
 
 ## Pipeline orchestration
@@ -61,12 +65,16 @@ summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
 ./pipeline.sh full                     # full pipeline
 ./pipeline.sh deploy                   # rsync src/ to remote
 ./pipeline.sh remote summarize         # run summarize on remote GPU
+./pipeline.sh remote cluster           # run clustering on remote GPU
 ./pipeline.sh pull summaries           # rsync results back
+./pipeline.sh pull clustering          # rsync clustering results back
 ./pipeline.sh logs                     # list recent remote logs
 ./pipeline.sh logs tail summarize      # tail a specific step's log
 ```
 
 Remote commands run via `nohup` with stdout/stderr piped to log files under `logs/` on the remote host. This ensures long-running GPU jobs survive SSH disconnects. The local terminal tails the log in real-time and reads the exit code from a status file when the job completes.
+
+Push/pull operations use parallel rsync (4 streams by default) with `--files-from` chunking for directory transfers. Pull operations detect missing files locally and only transfer new ones.
 
 ## Scripts
 
@@ -112,11 +120,15 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 ### Clustering & classification
 
-**`src/cluster_all_initiatives.py`** — Clusters feedback across initiatives using sentence embeddings. Supports agglomerative and HDBSCAN algorithms with configurable parameters. Reads from `data/analysis/unit_summaries/`, writes per-scheme output to `data/clustering/<scheme>/`. Scheme names encode the algorithm, model, and parameters (e.g. `agglomerative_google_embeddinggemma-300m_distance_threshold=0.75_...`).
+**`src/cluster_all_initiatives.py`** — Clusters feedback across initiatives using sentence embeddings. Supports agglomerative and HDBSCAN algorithms with configurable parameters. Reads from `data/analysis/unit_summaries/`, writes per-scheme output to `data/clustering/<scheme>/`. Scheme names encode the algorithm, model, and parameters (e.g. `agglomerative_google_embeddinggemma-300m_distance_threshold=0.75_...`). Uses a three-pass architecture: (1) load all initiatives and collect texts, (2) batch-encode all texts at once with multi-GPU support via SentenceTransformer's multi-process pool, (3) cluster each initiative from pre-computed embeddings. Supports `--skip-existing` to resume interrupted runs.
 
 **`src/classify_initiative_and_feedback.py`** — Classifies initiatives and their feedback using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes unit summaries as input, writes per-initiative classification JSONs to `data/classification/`.
 
 **`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`. Produces titled summaries at three levels: (1) a policy summary from initiative documents, (2) a titled summary per feedback item (feedback text + attachments), (3) recursive bottom-up cluster summaries that greedily combine child summaries within a character budget (`--combine-budget`, default 65,536). Long texts are chunked at sentence boundaries (default 16,384 chars). Supports resume: skips initiatives whose output already exists. Per-batch result files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery.
+
+### Webapp index
+
+**`src/build_webapp_index.py`** — Pre-computes the webapp initiative index and creates stripped copies of initiative detail JSONs. Reads from `data/scrape/initiative_details/`, writes `data/webapp/initiative_index.json` (single JSON array of all initiative summaries with pre-computed country counts, user type counts, feedback timelines, etc.) and `data/webapp/initiative_details/*.json` (copies with `extracted_text`, `extracted_text_without_ocr`, and `extracted_text_before_translation` stripped from feedback attachments to reduce file sizes). Deduplicates initiatives sharing identical sorted feedback ID sets, keeping the one with the most feedback. Supports `-o` for custom index output path.
 
 ### Webapp
 
@@ -133,12 +145,12 @@ A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback i
 - `/api/clusters/[id]` — Fetch clustering data for an initiative by scheme
 
 **Key lib files:**
-- `src/lib/data.ts` — Server-side data loading from `../data/`. Uses regex extraction (not JSON parsing) for fast index builds. 5-minute cache TTL.
+- `src/lib/data.ts` — Server-side data loading from `../data/webapp/`. Reads pre-built `initiative_index.json` for the index page and stripped initiative details (no attachment extracted_text) for detail pages. 5-minute cache TTL.
 - `src/lib/types.ts` — TypeScript interfaces for Initiative, Publication, Feedback, Attachment, ClusterData, etc.
 - `src/auth.ts` — Auth.js config with Google provider
 - `src/proxy.ts` — Session cookie refresh (Next.js 16 middleware proxy)
 
-**Running:** `cd webapp && npm run dev` (reads data from `../data/scrape/initiative_details/` and `../data/clustering/`).
+**Running:** `cd webapp && npm run dev` (reads data from `../data/webapp/` for index and initiative details, `../data/clustering/` for cluster data). Requires `build_webapp_index.py` to have been run first.
 
 ### Viewers
 

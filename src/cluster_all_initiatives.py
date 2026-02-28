@@ -252,11 +252,12 @@ def save_clustering(initiative, initiative_id, rows, assignments, embeddings,
     sil = None
     if non_noise_mask.all():
         top_unique = set(top_labels)
-        if len(top_unique) >= 2:
+        if 2 <= len(top_unique) < len(top_labels):
             sil = float(silhouette_score(embeddings, top_labels))
     else:
+        n_nn = int(non_noise_mask.sum())
         top_unique_nn = set(top_labels[non_noise_mask])
-        if len(top_unique_nn) >= 2 and non_noise_mask.sum() >= 2:
+        if 2 <= len(top_unique_nn) < n_nn:
             sil = float(silhouette_score(
                 embeddings[non_noise_mask], top_labels[non_noise_mask]))
 
@@ -279,6 +280,98 @@ def save_clustering(initiative, initiative_id, rows, assignments, embeddings,
     return out_path
 
 
+def cluster_initiative(initiative, init_id, rows, embeddings, args, params):
+    """Cluster a single initiative and save results. Returns (out_path, summary_str)."""
+    all_indices = np.arange(len(rows))
+
+    if args.algorithm == "hdbscan":
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=args.min_cluster_size,
+            min_samples=args.min_samples,
+        )
+        top_labels = clusterer.fit_predict(embeddings)
+
+        noise_mask = top_labels == -1
+        n_noise = int(noise_mask.sum())
+        unique_clusters = sorted(set(top_labels) - {-1})
+        n_top = len(unique_clusters)
+
+        assignments = {}
+        sub_clustered = 0
+
+        for i in all_indices[noise_mask]:
+            assignments[i] = "-1"
+
+        for cl in unique_clusters:
+            cl_mask = top_labels == cl
+            cl_indices = all_indices[cl_mask]
+            label = str(cl)
+
+            if len(cl_indices) > args.max_cluster_size and args.max_depth > 0:
+                sub_assignments = cluster_recursive_hdbscan(
+                    cl_indices, embeddings, args.min_cluster_size,
+                    args.min_samples, args.max_cluster_size,
+                    args.max_depth, 1, label,
+                )
+                assignments.update(sub_assignments)
+                if len(set(sub_assignments.values())) > 1:
+                    sub_clustered += 1
+            else:
+                for i in cl_indices:
+                    assignments[i] = label
+
+        n_final = len(set(assignments.values()) - {"-1"})
+
+        out_path = save_clustering(
+            initiative, init_id, rows, assignments, embeddings,
+            args.model, args.algorithm, params, args.output_dir,
+        )
+
+        summary = (f"{len(rows)} items -> {n_top} top clusters "
+                   f"({n_noise} noise) -> {n_final} final ({sub_clustered} sub-clustered)")
+
+    else:
+        ag = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=args.distance_threshold,
+            linkage=args.linkage,
+        )
+        top_labels = ag.fit_predict(embeddings)
+        n_top = len(set(top_labels))
+
+        assignments = {}
+        sub_clustered = 0
+        for cl in sorted(set(top_labels)):
+            cl_mask = top_labels == cl
+            cl_indices = all_indices[cl_mask]
+            label = str(cl)
+
+            if len(cl_indices) > args.max_cluster_size and args.max_depth > 0:
+                sub_assignments = cluster_recursive(
+                    cl_indices, embeddings, args.distance_threshold,
+                    args.linkage, args.sub_cluster_scale, args.max_cluster_size,
+                    args.max_depth, 1, label,
+                )
+                assignments.update(sub_assignments)
+                if len(set(sub_assignments.values())) > 1:
+                    sub_clustered += 1
+            else:
+                for i in cl_indices:
+                    assignments[i] = label
+
+        n_final = len(set(assignments.values()))
+
+        out_path = save_clustering(
+            initiative, init_id, rows, assignments, embeddings,
+            args.model, args.algorithm, params, args.output_dir,
+        )
+
+        summary = (f"{len(rows)} items -> {n_top} top clusters "
+                   f"-> {n_final} final ({sub_clustered} sub-clustered)")
+
+    return out_path, summary
+
+
 def main():
     args = parse_args()
 
@@ -286,10 +379,6 @@ def main():
     files = sorted(f for f in os.listdir(args.summaries_dir) if f.endswith(".json"))
     print(f"Found {len(files)} initiative files in {args.summaries_dir}/")
 
-    # Load model once
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading model: {args.model} (device={device})")
-    model = SentenceTransformer(args.model, device=device)
     print(f"Algorithm: {args.algorithm}")
     print(f"Sub-clustering: max_size={args.max_cluster_size}, max_depth={args.max_depth}")
     if args.algorithm == "agglomerative":
@@ -297,14 +386,6 @@ def main():
               f"scale={args.sub_cluster_scale}")
     else:
         print(f"  min_cluster_size={args.min_cluster_size}, min_samples={args.min_samples}")
-    print()
-
-    # Stats
-    total = len(files)
-    skipped = 0
-    processed = 0
-    errors = 0
-    t_start = time.time()
 
     # Build params dict based on algorithm
     if args.algorithm == "agglomerative":
@@ -323,13 +404,24 @@ def main():
             "max_depth": args.max_depth,
         }
 
+    # ── Pass 1: load all initiatives, collect texts ──
+    print("\nPass 1: loading initiatives and collecting texts...")
+    t_load = time.time()
+
+    # Each entry: (idx_in_files, init_id, initiative, rows, text_offset, text_count)
+    work_items = []
+    all_texts = []
+    skipped = 0
+    errors = 0
+    total = len(files)
+
+    model_safe = args.model.replace("/", "_")
+    param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
+
     for idx, fname in enumerate(files, 1):
         init_id = fname.replace(".json", "")
 
-        # Check skip-existing
         if args.skip_existing:
-            model_safe = args.model.replace("/", "_")
-            param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
             out_name = f"{init_id}_{args.algorithm}_{model_safe}_{param_str}.json"
             if os.path.exists(os.path.join(args.output_dir, out_name)):
                 skipped += 1
@@ -340,121 +432,74 @@ def main():
             with open(src_path) as f:
                 initiative = json.load(f)
         except Exception as e:
-            print(f"[{idx}/{total}] ERROR loading {fname}: {e}")
+            print(f"  ERROR loading {fname}: {e}")
             errors += 1
             continue
 
         rows = load_feedback(initiative)
         if len(rows) < 2:
-            print(f"[{idx}/{total}] {init_id}: {len(rows)} feedback items (skipped, need >=2)")
             skipped += 1
             continue
 
-        # Encode
+        offset = len(all_texts)
         texts = [r["combined_text"] for r in rows]
-        embeddings = model.encode(texts, show_progress_bar=False)
-        embeddings = normalize(embeddings)
+        all_texts.extend(texts)
+        work_items.append((idx, init_id, initiative, rows, offset, len(texts)))
 
-        all_indices = np.arange(len(rows))
+    print(f"  {len(work_items)} initiatives to process, {len(all_texts)} texts to encode "
+          f"({skipped} skipped, {errors} errors) [{time.time() - t_load:.1f}s]")
 
-        if args.algorithm == "hdbscan":
-            # ── HDBSCAN path ──
-            clusterer = hdbscan.HDBSCAN(
-                min_cluster_size=args.min_cluster_size,
-                min_samples=args.min_samples,
-            )
-            top_labels = clusterer.fit_predict(embeddings)
+    if not work_items:
+        print("Nothing to do.")
+        return
 
-            noise_mask = top_labels == -1
-            n_noise = int(noise_mask.sum())
-            unique_clusters = sorted(set(top_labels) - {-1})
-            n_top = len(unique_clusters)
+    # ── Pass 2: batch-encode all texts ──
+    n_gpus = torch.cuda.device_count()
+    print(f"\nPass 2: encoding {len(all_texts)} texts (model={args.model}, gpus={n_gpus})...")
+    t_enc = time.time()
 
-            # Build assignments with recursive sub-clustering
-            assignments = {}  # index -> hierarchical label string
-            sub_clustered = 0
+    model = SentenceTransformer(args.model)
+    if n_gpus > 1:
+        pool = model.start_multi_process_pool(
+            [f"cuda:{i}" for i in range(n_gpus)]
+        )
+        all_embeddings = model.encode_multi_process(all_texts, pool, batch_size=256)
+        model.stop_multi_process_pool(pool)
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        all_embeddings = model.encode(all_texts, show_progress_bar=True, batch_size=256)
 
-            # Top-level noise gets label "-1"
-            for i in all_indices[noise_mask]:
-                assignments[i] = "-1"
+    all_embeddings = normalize(all_embeddings)
+    t_enc = time.time() - t_enc
+    print(f"  Encoding done [{t_enc:.1f}s]")
 
-            for cl in unique_clusters:
-                cl_mask = top_labels == cl
-                cl_indices = all_indices[cl_mask]
-                label = str(cl)
+    # Free model memory before clustering
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-                if len(cl_indices) > args.max_cluster_size and args.max_depth > 0:
-                    sub_assignments = cluster_recursive_hdbscan(
-                        cl_indices, embeddings, args.min_cluster_size,
-                        args.min_samples, args.max_cluster_size,
-                        args.max_depth, 1, label,
-                    )
-                    assignments.update(sub_assignments)
-                    sub_labels_set = set(sub_assignments.values())
-                    if len(sub_labels_set) > 1:
-                        sub_clustered += 1
-                else:
-                    for i in cl_indices:
-                        assignments[i] = label
+    # ── Pass 3: cluster each initiative ──
+    print(f"\nPass 3: clustering {len(work_items)} initiatives...")
+    t_clust_total = time.time()
+    processed = 0
 
-            n_final = len(set(assignments.values()) - {"-1"})
+    for i, (idx, init_id, initiative, rows, offset, count) in enumerate(work_items, 1):
+        embeddings = all_embeddings[offset:offset + count]
 
-            out_path = save_clustering(
-                initiative, init_id, rows, assignments, embeddings,
-                args.model, args.algorithm, params, args.output_dir,
-            )
+        t_clust = time.time()
+        out_path, summary = cluster_initiative(
+            initiative, init_id, rows, embeddings, args, params,
+        )
+        t_clust = time.time() - t_clust
 
-            processed += 1
-            print(f"[{idx}/{total}] {init_id}: {len(rows)} items -> {n_top} top clusters "
-                  f"({n_noise} noise) -> {n_final} final ({sub_clustered} sub-clustered) "
-                  f"-> {os.path.basename(out_path)}")
+        processed += 1
+        print(f"[{i}/{len(work_items)}] {init_id}: {summary} [{t_clust:.2f}s]")
 
-        else:
-            # ── Agglomerative path ──
-            ag = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=args.distance_threshold,
-                linkage=args.linkage,
-            )
-            top_labels = ag.fit_predict(embeddings)
-            n_top = len(set(top_labels))
-
-            # Build assignments with recursive sub-clustering
-            assignments = {}  # index -> hierarchical label string
-            sub_clustered = 0
-            for cl in sorted(set(top_labels)):
-                cl_mask = top_labels == cl
-                cl_indices = all_indices[cl_mask]
-                label = str(cl)
-
-                if len(cl_indices) > args.max_cluster_size and args.max_depth > 0:
-                    sub_assignments = cluster_recursive(
-                        cl_indices, embeddings, args.distance_threshold,
-                        args.linkage, args.sub_cluster_scale, args.max_cluster_size,
-                        args.max_depth, 1, label,
-                    )
-                    assignments.update(sub_assignments)
-                    sub_labels_set = set(sub_assignments.values())
-                    if len(sub_labels_set) > 1:
-                        sub_clustered += 1
-                else:
-                    for i in cl_indices:
-                        assignments[i] = label
-
-            n_final = len(set(assignments.values()))
-
-            out_path = save_clustering(
-                initiative, init_id, rows, assignments, embeddings,
-                args.model, args.algorithm, params, args.output_dir,
-            )
-
-            processed += 1
-            print(f"[{idx}/{total}] {init_id}: {len(rows)} items -> {n_top} top clusters "
-                  f"-> {n_final} final ({sub_clustered} sub-clustered) "
-                  f"-> {os.path.basename(out_path)}")
-
-    elapsed = time.time() - t_start
-    print(f"\nDone in {elapsed:.1f}s. Processed: {processed}, Skipped: {skipped}, Errors: {errors}")
+    t_clust_total = time.time() - t_clust_total
+    t_total = t_enc + t_clust_total
+    print(f"\nDone in {t_total:.1f}s (encode={t_enc:.1f}s, cluster={t_clust_total:.1f}s). "
+          f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}")
 
 
 if __name__ == "__main__":

@@ -101,24 +101,82 @@ run_remote() {
     stage_end "remote $name"
 }
 
-rsync_to_remote() {
-    local local_path="$1" remote_path="$2"
-    if [[ "$remote_path" == */ ]]; then
-        $SSH_CMD "mkdir -p ${REMOTE_DIR}/${remote_path}"
-    else
-        $SSH_CMD "mkdir -p $(dirname "${REMOTE_DIR}/${remote_path}")"
+RSYNC_OPTS=(-avz -e "ssh -i ${SSH_KEY}")
+PARALLEL_JOBS=4
+
+# Split a file list into N chunks and run parallel rsync with --files-from.
+# Usage: parallel_rsync <file_list_file> <src_base> <dst_spec> [extra_rsync_args...]
+parallel_rsync() {
+    local file_list="$1" src_base="$2" dst_spec="$3"
+    shift 3
+    local n_files
+    n_files=$(wc -l < "$file_list" | tr -d ' ')
+    if [ "$n_files" -eq 0 ]; then
+        echo "Nothing to transfer"
+        return
     fi
-    rsync -avz -e "ssh -i ${SSH_KEY}" \
-        "$local_path" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}"
+    local chunk_size=$(( (n_files + PARALLEL_JOBS - 1) / PARALLEL_JOBS ))
+    echo "Transferring $n_files files ($PARALLEL_JOBS parallel streams)"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    split -l "$chunk_size" "$file_list" "${tmpdir}/chunk_"
+    local pids=()
+    for chunk in "${tmpdir}"/chunk_*; do
+        rsync "${RSYNC_OPTS[@]}" "$@" --files-from="$chunk" \
+            "$src_base" "$dst_spec" &
+        pids+=($!)
+    done
+    local failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" || failed=$((failed + 1))
+    done
+    rm -rf "$tmpdir"
+    if [ "$failed" -gt 0 ]; then
+        echo "WARNING: $failed rsync streams had errors"
+        return 1
+    fi
 }
 
+# Push a local directory or file to remote.
+rsync_to_remote() {
+    local local_path="$1" remote_path="$2"
+    if [[ -d "$local_path" || "$local_path" == */ ]]; then
+        local src_dir="${local_path%/}"
+        $SSH_CMD "mkdir -p ${REMOTE_DIR}/${remote_path}"
+        local tmpfile
+        tmpfile=$(mktemp)
+        (cd "$src_dir" && find . -type f) | sed 's|^\./||' | sort > "$tmpfile"
+        parallel_rsync "$tmpfile" "$src_dir/" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path%/}/"
+        rm -f "$tmpfile"
+    else
+        $SSH_CMD "mkdir -p $(dirname "${REMOTE_DIR}/${remote_path}")"
+        rsync "${RSYNC_OPTS[@]}" \
+            "$local_path" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}"
+    fi
+}
+
+# Pull a remote directory or file, skipping files that already exist locally.
 rsync_from_remote() {
     local remote_path="$1" local_path="$2"
     mkdir -p "$(dirname "$local_path")"
-    rsync -avz --ignore-existing -e "ssh -i ${SSH_KEY}" \
-        "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
+    if [[ "$remote_path" == */ ]]; then
+        mkdir -p "${local_path%/}"
+        local remote_dir="${remote_path%/}"
+        local local_dir="${local_path%/}"
+        local tmpfile
+        tmpfile=$(mktemp)
+        rsync "${RSYNC_OPTS[@]}" --ignore-existing --list-only \
+            "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" 2>/dev/null | \
+            awk '/^[^d]/ {print $NF}' | sort > "$tmpfile"
+        parallel_rsync "$tmpfile" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" --ignore-existing
+        rm -f "$tmpfile"
+    else
+        rsync "${RSYNC_OPTS[@]}" --ignore-existing \
+            "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
+    fi
 }
 
+# Pull from remote with exclude patterns, using parallel rsync.
 rsync_from_remote_exclude() {
     local remote_path="$1" local_path="$2"
     shift 2
@@ -127,8 +185,21 @@ rsync_from_remote_exclude() {
         excludes+=(--exclude "$pat")
     done
     mkdir -p "$(dirname "$local_path")"
-    rsync -avz --ignore-existing "${excludes[@]}" -e "ssh -i ${SSH_KEY}" \
-        "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
+    if [[ "$remote_path" == */ ]]; then
+        mkdir -p "${local_path%/}"
+        local remote_dir="${remote_path%/}"
+        local local_dir="${local_path%/}"
+        local tmpfile
+        tmpfile=$(mktemp)
+        rsync "${RSYNC_OPTS[@]}" --ignore-existing "${excludes[@]}" --list-only \
+            "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" 2>/dev/null | \
+            awk '/^[^d]/ {print $NF}' | sort > "$tmpfile"
+        parallel_rsync "$tmpfile" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" --ignore-existing "${excludes[@]}"
+        rm -f "$tmpfile"
+    else
+        rsync "${RSYNC_OPTS[@]}" --ignore-existing "${excludes[@]}" \
+            "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
+    fi
 }
 
 # Parse a scheme name like "agglomerative_google_embeddinggemma-300m_k1=v1_k2=v2"
@@ -264,8 +335,7 @@ do_build_index() {
 do_deploy() {
     stage_start "deploy code to remote"
     $SSH_CMD "mkdir -p ${REMOTE_DIR}/src"
-    rsync -avz --exclude='__pycache__' \
-        -e "ssh -i ${SSH_KEY}" \
+    rsync "${RSYNC_OPTS[@]}" --exclude='__pycache__' \
         "${SCRIPT_DIR}/src/" "${REMOTE_HOST}:${REMOTE_DIR}/src/"
     stage_end "deploy code to remote"
 }
@@ -343,6 +413,11 @@ do_pull() {
             rsync_from_remote data/classification/ data/classification/
             stage_end "pull classification results"
             ;;
+        clustering)
+            stage_start "pull clustering results"
+            rsync_from_remote data/clustering/ data/clustering/
+            stage_end "pull clustering results"
+            ;;
         cluster-summaries)
             stage_start "pull cluster summaries"
             rsync_from_remote_exclude data/cluster_summaries/ data/cluster_summaries/ '_batches*'
@@ -358,12 +433,13 @@ do_pull() {
             do_pull translation
             do_pull summaries
             do_pull classification
+            do_pull clustering
             do_pull cluster-summaries
             do_pull change-summaries
             ;;
         *)
             echo "ERROR: Unknown pull target: $target"
-            echo "Valid targets: ocr, translation, summaries, classification, cluster-summaries, change-summaries, all"
+            echo "Valid targets: ocr, translation, summaries, classification, clustering, cluster-summaries, change-summaries, all"
             exit 1
             ;;
     esac
@@ -396,6 +472,24 @@ do_remote() {
                 $PYTHON src/classify_initiative_and_feedback.py \
                     data/analysis/unit_summaries/ \
                     -o data/classification/ "$@"
+            ;;
+        cluster)
+            if [ -z "$CLUSTER_SCHEMES" ]; then
+                echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+                exit 1
+            fi
+            for scheme in $CLUSTER_SCHEMES; do
+                parse_scheme "$scheme"
+                local out_dir
+                out_dir="$(scheme_output_dir "$scheme")"
+                run_remote "cluster ($SCHEME_ALGO)" \
+                    $PYTHON src/cluster_all_initiatives.py \
+                        --algorithm "$SCHEME_ALGO" \
+                        --model "$SCHEME_MODEL" \
+                        --output-dir "$out_dir" \
+                        "${SCHEME_FLAGS[@]}" \
+                        "$@"
+            done
             ;;
         summarize-clusters)
             if [ -z "$CLUSTER_SCHEMES" ]; then
@@ -454,13 +548,18 @@ do_full() {
     do_remote summarize "$@"
     do_pull summaries
 
-    # Build unit summaries + clustering
+    # Build unit summaries
     do_build_summaries "$@"
-    do_cluster "$@"
+
+    # Remote clustering -> pull
+    do_push unit-summaries
+    do_remote cluster "$@"
+    do_pull clustering
+
+    # Build webapp index from clustering results
     do_build_index "$@"
 
     # Push for remote cluster summarization
-    do_push unit-summaries
     do_push clustering
 
     # Remote cluster summarization -> pull
@@ -542,16 +641,18 @@ Full pipeline (./pipeline.sh full):
   15  remote summarize          Run GPU document summarization on remote
   16  pull summaries            Pull document summaries back
   17  build-summaries           Build unit summaries from document summaries
-  18  cluster                   Cluster all initiatives (per configured schemes)
-  19  build-index               Pre-compute webapp initiative index
-  20  push unit-summaries       Push unit summaries to remote
-  21  push clustering           Push clustering data to remote
-  22  remote summarize-clusters Run GPU cluster summarization on remote
-  23  pull cluster-summaries    Pull cluster summaries back
-  24  remote summarize-changes  Run GPU change summarization on remote
-  25  pull change-summaries     Pull change summaries back
+  18  push unit-summaries       Push unit summaries to remote
+  19  remote cluster            Run GPU clustering on remote (multi-GPU)
+  20  pull clustering           Pull clustering results back
+  21  build-index               Pre-compute webapp initiative index + stripped details
+  22  push clustering           Push clustering data to remote
+  23  remote summarize-clusters Run GPU cluster summarization on remote
+  24  pull cluster-summaries    Pull cluster summaries back
+  25  remote summarize-changes  Run GPU change summarization on remote
+  26  pull change-summaries     Pull change summaries back
 
 Other commands:
+  cluster                  Cluster all initiatives locally (per configured schemes)
   remote classify          Run GPU classification on remote
   pull classification      Pull classification results back
   clean-batches <target>   Delete batch files on remote (summaries, cluster-summaries,
@@ -559,7 +660,7 @@ Other commands:
   logs                     List recent remote logs
   logs tail [step]         Tail most recent log (optionally filtered by step name)
 
-Extra args are passed through to the underlying Python scripts.
+Push/pull use parallel rsync (4 streams). Extra args are passed through to Python scripts.
 EOF
 }
 
