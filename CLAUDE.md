@@ -116,7 +116,7 @@ Remote commands run via `nohup` with stdout/stderr piped to log files under `log
 
 **`src/classify_initiative_and_feedback.py`** — Classifies initiatives and their feedback using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes unit summaries as input, writes per-initiative classification JSONs to `data/classification/`.
 
-**`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`.
+**`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`. Produces titled summaries at three levels: (1) a policy summary from initiative documents, (2) a titled summary per feedback item (feedback text + attachments), (3) recursive bottom-up cluster summaries that combine child summaries in groups of `--max-combine-chunks` (default 4). Long texts are chunked at sentence boundaries (default 16,384 chars). Supports resume: skips initiatives whose output already exists. Per-batch result files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery.
 
 ### Webapp
 

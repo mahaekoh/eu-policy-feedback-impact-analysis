@@ -337,6 +337,32 @@ python3 src/summarize_changes.py data/analysis/unit_summaries/ \
 - **Output**: initiative JSONs with `change_summary` field added at top level
 - **Deduplication + resume**: same as other inference scripts (cross-batch cache, batch file resume)
 
+#### `summarize_clusters.py`
+
+Summarizes clustered feedback using LLM batch inference. Produces titled summaries at three levels per initiative.
+
+```bash
+python3 src/summarize_clusters.py data/clustering/<scheme>/ \
+    -o data/cluster_summaries/<scheme>/
+```
+
+- **Model**: `unsloth/gpt-oss-120b` via vLLM
+- **Input**: clustering output from `cluster_all_initiatives.py` (one JSON per initiative with `cluster_assignments`)
+- **Three phases**:
+  1. **Policy summary** — concatenates all publication document texts, chunks and summarizes them into a single titled summary
+  2. **Feedback summaries** — summarizes each feedback item (free-text comment + attachment texts) into a titled summary; chunking and recursive combining for long items
+  3. **Cluster summaries** — bottom-up recursive combining of feedback summaries by cluster hierarchy; at each depth level, child summaries are grouped into batches of `--max-combine-chunks` (default 4) and combined, repeating until each cluster has a single titled summary
+- **Prompt structure**:
+  - All summaries produce a title on the first line, blank line, then up to 10 paragraphs
+  - Policy prompts focus on objectives, scope, key measures, and regulatory approach
+  - Feedback prompts focus on position, arguments, recommendations, and evidence
+  - Cluster combine prompts capture common themes, range of positions, and key arguments
+  - All prompts include nuclear energy preservation clause
+- **Chunking**: sentence-boundary splits at 16,384 chars (configurable via `--chunk-size`)
+- **Batch files**: `_batches_p1/` (policy + feedback chunk summaries), `_batches_p2/` (feedback combining), `_batches_p3/` (cluster combining by depth)
+- **Deduplication + resume**: same as other inference scripts (cross-batch cache, batch file resume, initiative-level skip)
+- **Output**: one JSON per initiative with `policy_summary`, `feedback_summaries` (keyed by feedback ID), and `cluster_summaries` (keyed by cluster label), each containing `title`, `summary`, and `feedback_count`
+
 ### Webapp (`webapp/`)
 
 A Next.js web application for browsing initiatives and feedback interactively.
