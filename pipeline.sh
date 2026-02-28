@@ -217,6 +217,13 @@ do_cluster() {
     done
 }
 
+do_build_index() {
+    run_local "build webapp index" \
+        $PYTHON src/build_webapp_index.py \
+            data/scrape/initiative_details \
+            -o data/webapp/initiative_index.json "$@"
+}
+
 # ── Deploy / sync ────────────────────────────────────────────────────────────
 
 do_deploy() {
@@ -415,6 +422,7 @@ do_full() {
     # Build unit summaries + clustering
     do_build_summaries "$@"
     do_cluster "$@"
+    do_build_index "$@"
 
     # Push for remote cluster summarization
     do_push unit-summaries
@@ -500,12 +508,13 @@ Full pipeline (./pipeline.sh full):
   16  pull summaries            Pull document summaries back
   17  build-summaries           Build unit summaries from document summaries
   18  cluster                   Cluster all initiatives (per configured schemes)
-  19  push unit-summaries       Push unit summaries to remote
-  20  push clustering           Push clustering data to remote
-  21  remote summarize-clusters Run GPU cluster summarization on remote
-  22  pull cluster-summaries    Pull cluster summaries back
-  23  remote summarize-changes  Run GPU change summarization on remote
-  24  pull change-summaries     Pull change summaries back
+  19  build-index               Pre-compute webapp initiative index
+  20  push unit-summaries       Push unit summaries to remote
+  21  push clustering           Push clustering data to remote
+  22  remote summarize-clusters Run GPU cluster summarization on remote
+  23  pull cluster-summaries    Pull cluster summaries back
+  24  remote summarize-changes  Run GPU change summarization on remote
+  25  pull change-summaries     Pull change summaries back
 
 Other commands:
   remote classify          Run GPU classification on remote
@@ -581,6 +590,7 @@ case "$STAGE" in
     analyze)            do_analyze "$@" ;;
     build-summaries)    do_build_summaries "$@" ;;
     cluster)            do_cluster "$@" ;;
+    build-index)        do_build_index "$@" ;;
     deploy)             do_deploy ;;
     push)               do_push "$@" ;;
     pull)               do_pull "$@" ;;

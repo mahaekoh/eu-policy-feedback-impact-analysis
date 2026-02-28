@@ -8,6 +8,7 @@ import { formatDate } from "@/lib/utils";
 import { ExpandableText } from "@/components/expandable-text";
 import { PublicationSection } from "@/components/publication-section";
 import { ClusterView } from "@/components/cluster-view";
+import { CountryBar, UserTypeBar } from "@/components/cluster-stats-bar";
 
 type ViewMode = "publications" | "clusters";
 
@@ -43,6 +44,8 @@ interface InitiativeDetailProps {
   initialClusterData?: ClusterData | null;
   initialScheme?: string | null;
   feedbackTimeline?: number[];
+  countryCounts?: Record<string, number>;
+  userTypeCounts?: Record<string, number>;
 }
 
 export function InitiativeDetail({
@@ -51,6 +54,8 @@ export function InitiativeDetail({
   initialClusterData = null,
   initialScheme = null,
   feedbackTimeline = [],
+  countryCounts = {},
+  userTypeCounts = {},
 }: InitiativeDetailProps) {
   const hasClusters = clusterSchemes.length > 0;
   const [viewMode, setViewMode] = useState<ViewMode>(
@@ -84,6 +89,17 @@ export function InitiativeDetail({
   const totalFeedback = initiative.publications.reduce(
     (sum, p) => sum + p.total_feedback,
     0
+  );
+
+  const sortedCountries = useMemo(
+    () =>
+      Object.entries(countryCounts).sort((a, b) => b[1] - a[1]) as [string, number][],
+    [countryCounts]
+  );
+  const sortedTypes = useMemo(
+    () =>
+      Object.entries(userTypeCounts).sort((a, b) => b[1] - a[1]) as [string, number][],
+    [userTypeCounts]
   );
 
   // Collect all feedback items for cluster view
@@ -138,6 +154,17 @@ export function InitiativeDetail({
         {feedbackTimeline.length > 0 && (
           <div className="mb-1">
             <TimelineSparkline counts={feedbackTimeline} />
+          </div>
+        )}
+
+        {totalFeedback > 0 && (sortedCountries.length > 0 || sortedTypes.length > 0) && (
+          <div className="flex flex-col gap-1 max-w-md mb-2">
+            {sortedCountries.length > 0 && (
+              <CountryBar sortedCountries={sortedCountries} total={totalFeedback} />
+            )}
+            {sortedTypes.length > 0 && (
+              <UserTypeBar sortedTypes={sortedTypes} total={totalFeedback} />
+            )}
           </div>
         )}
 

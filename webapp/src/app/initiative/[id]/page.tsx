@@ -33,6 +33,19 @@ export default async function InitiativePage({ params }: PageProps) {
       }
     }
   }
+  const countryCounts: Record<string, number> = {};
+  const userTypeCounts: Record<string, number> = {};
+  for (const pub of initiative.publications) {
+    for (const fb of pub.feedback || []) {
+      if (fb.country) {
+        countryCounts[fb.country] = (countryCounts[fb.country] || 0) + 1;
+      }
+      if (fb.user_type) {
+        userTypeCounts[fb.user_type] = (userTypeCounts[fb.user_type] || 0) + 1;
+      }
+    }
+  }
+
   let feedbackTimeline: number[] = [];
   if (feedbackDates.length > 0) {
     let endMs = startMs;
@@ -72,6 +85,8 @@ export default async function InitiativePage({ params }: PageProps) {
           initialClusterData={initialClusterData}
           initialScheme={clusterSchemes[0] ?? null}
           feedbackTimeline={feedbackTimeline}
+          countryCounts={countryCounts}
+          userTypeCounts={userTypeCounts}
         />
       </div>
     </main>
