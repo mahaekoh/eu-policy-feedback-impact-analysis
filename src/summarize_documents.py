@@ -106,7 +106,9 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
                 if should_skip_text(text):
                     continue
                 text = text.strip()
-                chunks = split_into_chunks(text, chunk_size)
+                init_id = filename.replace(".json", "")
+                label = f"init={init_id} {list_name}[{doc_idx}] {doc.get('filename', '?')}"
+                chunks = split_into_chunks(text, chunk_size, label=label)
                 item_chunk_counts[item_index] = len(chunks)
                 item_is_feedback[item_index] = False
                 item_locations.append({
@@ -139,7 +141,8 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
                 if should_skip_text(text):
                     continue
                 text = text.strip()
-                chunks = split_into_chunks(text, chunk_size)
+                label = f"init={filename.replace('.json', '')} fb={fb.get('id', '?')} att={att.get('id', '?')}"
+                chunks = split_into_chunks(text, chunk_size, label=label)
                 item_chunk_counts[item_index] = len(chunks)
                 item_is_feedback[item_index] = True
                 item_locations.append({

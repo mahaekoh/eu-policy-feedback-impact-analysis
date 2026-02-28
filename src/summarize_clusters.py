@@ -232,7 +232,7 @@ def summarize_single_text(text, prompt_prefix, combine_prefix, chunk_size,
         return None
 
     text = text.strip()
-    chunks = split_into_chunks(text, chunk_size)
+    chunks = split_into_chunks(text, chunk_size, label=label)
     n_chunks = len(chunks)
 
     # Phase 1: chunk-level summaries
@@ -430,7 +430,8 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
             continue
 
         text = text.strip()
-        chunks = split_into_chunks(text, chunk_size)
+        label = f"init={init_id} fb={feedback_id}"
+        chunks = split_into_chunks(text, chunk_size, label=label)
         fb_chunk_counts[feedback_id] = len(chunks)
 
         for ci, chunk in enumerate(chunks):

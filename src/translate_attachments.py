@@ -146,7 +146,8 @@ def main():
         text = rec.get("extracted_text", "")
         if not text or not text.strip() or text.startswith("%PDF-"):
             continue
-        chunks = split_into_chunks(text.strip(), args.chunk_size)
+        label = f"init={rec.get('initiative_id', '?')} fb={rec.get('feedback_id', '?')} att={rec.get('attachment_id', '?')}"
+        chunks = split_into_chunks(text.strip(), args.chunk_size, label=label)
         record_chunk_counts[i] = len(chunks)
         for ci, chunk in enumerate(chunks):
             chunk_texts.append(chunk)

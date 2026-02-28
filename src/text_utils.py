@@ -1,12 +1,23 @@
 """Shared text processing utilities."""
 
+import logging
 import re
 
+logger = logging.getLogger(__name__)
 
-def split_into_chunks(text: str, max_chars: int) -> list:
-    """Split text into chunks of at most max_chars, breaking at sentence boundaries."""
+
+def split_into_chunks(text: str, max_chars: int, label: str = "") -> list:
+    """Split text into chunks of at most max_chars, breaking at sentence boundaries.
+
+    Args:
+        text: The text to split.
+        max_chars: Maximum characters per chunk.
+        label: Optional identifier for log messages (e.g. "init=12096 fb=503089").
+    """
     if len(text) <= max_chars:
         return [text]
+
+    tag = f" [{label}]" if label else ""
 
     # Split into sentences (period/question/exclamation followed by space or newline)
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -16,12 +27,38 @@ def split_into_chunks(text: str, max_chars: int) -> list:
     for sentence in sentences:
         # If a single sentence exceeds max_chars, split it by newlines as fallback
         if len(sentence) > max_chars:
+            logger.warning("Sentence exceeds max_chars (%d > %d), falling back to newline split%s",
+                           len(sentence), max_chars, tag)
             if current:
                 chunks.append(current)
                 current = ""
             parts = sentence.split("\n")
             for part in parts:
                 if not part.strip():
+                    continue
+                # If a single line still exceeds max_chars, split at word
+                # boundaries first, then hard-split as last resort
+                if len(part) > max_chars:
+                    logger.warning("Line exceeds max_chars (%d > %d), falling back to word boundary split%s",
+                                   len(part), max_chars, tag)
+                    if current:
+                        chunks.append(current)
+                        current = ""
+                    words = part.split(" ")
+                    for word in words:
+                        if len(word) > max_chars:
+                            logger.warning("Word exceeds max_chars (%d > %d), hard-splitting%s",
+                                           len(word), max_chars, tag)
+                            if current:
+                                chunks.append(current)
+                                current = ""
+                            for i in range(0, len(word), max_chars):
+                                chunks.append(word[i:i + max_chars])
+                        elif current and len(current) + len(word) + 1 > max_chars:
+                            chunks.append(current)
+                            current = word
+                        else:
+                            current = current + " " + word if current else word
                     continue
                 if current and len(current) + len(part) + 1 > max_chars:
                     chunks.append(current)

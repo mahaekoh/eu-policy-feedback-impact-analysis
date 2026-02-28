@@ -171,7 +171,8 @@ def load_from_batches(batch_dir, details_dir, chunk_size, input_records_path=Non
             if initiative:
                 original_text = _find_attachment_text(initiative, pub_id, fb_id, att_id)
                 if original_text:
-                    orig_chunks = split_into_chunks(original_text.strip(), chunk_size)
+                    label = f"init={init_id} fb={fb_id} att={att_id}"
+                    orig_chunks = split_into_chunks(original_text.strip(), chunk_size, label=label)
                     for ci, chunk in enumerate(orig_chunks):
                         original_chunks_map[ci] = chunk
 

@@ -81,7 +81,8 @@ def main():
         print("Attachment has no extracted_text")
         sys.exit(0)
 
-    chunks = split_into_chunks(text.strip(), args.chunk_size)
+    label = f"init={init_id} fb={fb_id} att={att_id}"
+    chunks = split_into_chunks(text.strip(), args.chunk_size, label=label)
 
     print(f"Attachment: init={init_id} fb={fb_id} att={att_id}")
     print(f"Filename: {target.get('filename', '?')}")
