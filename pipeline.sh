@@ -508,13 +508,62 @@ Full pipeline (./pipeline.sh full):
   24  pull change-summaries     Pull change summaries back
 
 Other commands:
-  remote classify     Run GPU classification on remote
-  pull classification Pull classification results back
-  logs                List recent remote logs
-  logs tail [step]    Tail most recent log (optionally filtered by step name)
+  remote classify          Run GPU classification on remote
+  pull classification      Pull classification results back
+  clean-batches <target>   Delete batch files on remote (summaries, cluster-summaries,
+                           change-summaries, translation, all)
+  logs                     List recent remote logs
+  logs tail [step]         Tail most recent log (optionally filtered by step name)
 
 Extra args are passed through to the underlying Python scripts.
 EOF
+}
+
+# ── Clean batch files ─────────────────────────────────────────────────────────
+
+do_clean_batches() {
+    local target="${1:?Usage: pipeline.sh clean-batches <target>}"
+    shift
+    case "$target" in
+        summaries)
+            stage_start "clean summary batch files (remote)"
+            $SSH_CMD "rm -rf ${REMOTE_DIR}/data/analysis/summaries/_batches_pass1 \
+                             ${REMOTE_DIR}/data/analysis/summaries/_batches_pass2"
+            stage_end "clean summary batch files (remote)"
+            ;;
+        cluster-summaries)
+            if [ -z "$CLUSTER_SCHEMES" ]; then
+                echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+                exit 1
+            fi
+            for scheme in $CLUSTER_SCHEMES; do
+                stage_start "clean cluster summary batch files ($scheme, remote)"
+                $SSH_CMD "rm -rf ${REMOTE_DIR}/data/cluster_summaries/${scheme}/_batches*"
+                stage_end "clean cluster summary batch files ($scheme, remote)"
+            done
+            ;;
+        change-summaries)
+            stage_start "clean change summary batch files (remote)"
+            $SSH_CMD "rm -rf ${REMOTE_DIR}/data/analysis/change_summaries/_batches"
+            stage_end "clean change summary batch files (remote)"
+            ;;
+        translation)
+            stage_start "clean translation batch files (remote)"
+            $SSH_CMD "rm -rf ${REMOTE_DIR}/data/translation/non_english_attachments_translated_batches"
+            stage_end "clean translation batch files (remote)"
+            ;;
+        all)
+            do_clean_batches summaries
+            do_clean_batches cluster-summaries
+            do_clean_batches change-summaries
+            do_clean_batches translation
+            ;;
+        *)
+            echo "ERROR: Unknown clean-batches target: $target"
+            echo "Valid targets: summaries, cluster-summaries, change-summaries, translation, all"
+            exit 1
+            ;;
+    esac
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
@@ -537,6 +586,7 @@ case "$STAGE" in
     pull)               do_pull "$@" ;;
     remote)             do_remote "$@" ;;
     logs)               do_logs "$@" ;;
+    clean-batches)      do_clean_batches "$@" ;;
     full)               do_full "$@" ;;
     *)
         echo "ERROR: Unknown stage: $STAGE"

@@ -32,7 +32,7 @@ from openai_harmony import (
 from vllm import LLM, SamplingParams
 
 from inference_utils import build_prefill, extract_final_texts, run_batch_inference
-from text_utils import split_into_chunks
+from text_utils import should_skip_text, split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
@@ -66,13 +66,8 @@ FEEDBACK_COMBINE_PREFIX = (
 
 
 
-def should_skip_text(text):
-    """Return True if text should not be summarized."""
-    if not text or not text.strip():
-        return True
-    if text.startswith("%PDF-"):
-        return True
-    return False
+
+
 
 
 def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size):

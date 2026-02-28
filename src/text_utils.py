@@ -5,6 +5,26 @@ import re
 
 logger = logging.getLogger(__name__)
 
+MIN_PRINTABLE_RATIO = 0.5
+
+
+def should_skip_text(text: str, label: str = "") -> bool:
+    """Return True if text should not be summarized."""
+    tag = f" [{label}]" if label else ""
+    if not text or not text.strip():
+        logger.warning("Empty or whitespace-only text, skipping%s", tag)
+        return True
+    if text.startswith("%PDF-"):
+        logger.warning("Raw PDF binary detected, skipping%s", tag)
+        return True
+    # Skip text that is mostly non-printable (failed PDF extraction)
+    printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+    if printable / len(text) < MIN_PRINTABLE_RATIO:
+        logger.warning("Text is only %.0f%% printable (%d/%d chars), skipping%s",
+                       printable / len(text) * 100, printable, len(text), tag)
+        return True
+    return False
+
 
 def split_into_chunks(text: str, max_chars: int, label: str = "") -> list:
     """Split text into chunks of at most max_chars, breaking at sentence boundaries.
@@ -44,7 +64,7 @@ def split_into_chunks(text: str, max_chars: int, label: str = "") -> list:
                     if current:
                         chunks.append(current)
                         current = ""
-                    words = part.split(" ")
+                    words = re.split(r'\s+', part)
                     for word in words:
                         if len(word) > max_chars:
                             logger.warning("Word exceeds max_chars (%d > %d), hard-splitting%s",
