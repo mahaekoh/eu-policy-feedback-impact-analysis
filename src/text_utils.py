@@ -27,7 +27,12 @@ def should_skip_text(text: str, label: str = "") -> bool:
 
 
 def group_by_char_budget(texts: list, max_chars: int) -> list:
-    """Group texts greedily so each group's combined length fits within max_chars."""
+    """Group texts greedily so each group's combined length fits within max_chars.
+
+    Each group contains at least 2 items when possible, to guarantee progress
+    during recursive combining. If every item exceeds the budget individually,
+    they are paired up.
+    """
     groups = []
     current_group = []
     current_len = 0
@@ -45,6 +50,18 @@ def group_by_char_budget(texts: list, max_chars: int) -> list:
 
     if current_group:
         groups.append(current_group)
+
+    # If all groups are singletons and there are multiple texts, no progress
+    # would be made during recursive combining. Force-pair adjacent singletons
+    # to guarantee convergence.
+    if len(groups) > 1 and all(len(g) == 1 for g in groups):
+        paired = []
+        for i in range(0, len(groups), 2):
+            if i + 1 < len(groups):
+                paired.append([groups[i][0], groups[i + 1][0]])
+            else:
+                paired.append(groups[i])
+        groups = paired
 
     return groups
 

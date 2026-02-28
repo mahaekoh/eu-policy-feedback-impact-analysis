@@ -30,8 +30,18 @@ export function FeedbackCard({ feedback }: FeedbackCardProps) {
             {feedback.language}
           </span>
         )}
-        <span className="text-xs text-muted-foreground ml-auto">
+        <span className="text-xs text-muted-foreground ml-auto flex items-center gap-2">
           {formatDate(feedback.date)}
+          {feedback.url && (
+            <a
+              href={feedback.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline"
+            >
+              EU Portal
+            </a>
+          )}
         </span>
       </div>
 

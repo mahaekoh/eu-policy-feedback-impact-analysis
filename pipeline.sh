@@ -79,7 +79,7 @@ run_remote() {
     # Tail the log locally until the remote process exits.
     # Poll for the status file since --pid doesn't work across SSH sessions.
     # shellcheck disable=SC2029
-    $SSH_CMD "tail -f ${REMOTE_DIR}/${log_file} &
+    $SSH_CMD "tail -n 20 -f ${REMOTE_DIR}/${log_file} &
         TAIL_PID=\$!
         while [ ! -f ${REMOTE_DIR}/${status_file} ]; do sleep 2; done
         sleep 1
@@ -451,14 +451,14 @@ do_logs() {
                 # Tail the most recent log
                 echo "Tailing most recent remote log..."
                 # shellcheck disable=SC2029
-                $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/*.log 2>/dev/null | head -1)"
+                $SSH_CMD "tail -n 20 -f \$(ls -t ${REMOTE_DIR}/logs/*.log 2>/dev/null | head -1)"
             else
                 # Tail the most recent log matching the step name
                 local pattern
                 pattern="$(echo "$step" | tr ' ()' '_')"
                 echo "Tailing most recent '$step' log..."
                 # shellcheck disable=SC2029
-                $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
+                $SSH_CMD "tail -n 20 -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
             fi
             ;;
         ocr|translate|summarize|classify|summarize-clusters|summarize-changes)
@@ -466,7 +466,7 @@ do_logs() {
             pattern="$(echo "$target" | tr ' ()' '_')"
             echo "Tailing most recent '$target' log..."
             # shellcheck disable=SC2029
-            $SSH_CMD "tail -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
+            $SSH_CMD "tail -n 20 -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
             ;;
         *)
             echo "Usage: pipeline.sh logs [list|tail [step]|ocr|translate|summarize|classify|summarize-clusters|summarize-changes]"

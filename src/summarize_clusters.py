@@ -406,11 +406,14 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
     fb_lookup = find_feedback_by_id(initiative)
     feedback_summaries = {}  # feedback_id -> {"title": ..., "summary": ...}
 
-    # Collect all feedback texts and build chunk-level prompts
+    # Collect all feedback texts, deduplicate, and build chunk-level prompts
     fb_prompts = []
     fb_prompt_texts = []
     fb_prompt_map = []  # (feedback_id, chunk_index)
     fb_chunk_counts = {}  # feedback_id -> n_chunks
+    fb_text_to_canonical = {}  # text -> first feedback_id that uses it
+    fb_dedup_map = {}  # feedback_id -> canonical feedback_id (for duplicates)
+    fb_dedup_count = 0
 
     for feedback_id in cluster_assignments:
         fb = fb_lookup.get(feedback_id)
@@ -424,6 +427,15 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
             continue
 
         text = text.strip()
+
+        # Deduplicate: if we've seen this exact text before, map to the canonical ID
+        if text in fb_text_to_canonical:
+            canonical_id = fb_text_to_canonical[text]
+            fb_dedup_map[feedback_id] = canonical_id
+            fb_dedup_count += 1
+            continue
+        fb_text_to_canonical[text] = feedback_id
+
         chunks = split_into_chunks(text, chunk_size, label=label)
         fb_chunk_counts[feedback_id] = len(chunks)
 
@@ -435,6 +447,9 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
             fb_prompts.append(prefill)
             fb_prompt_texts.append(chunk)
             fb_prompt_map.append((feedback_id, ci))
+
+    if fb_dedup_count:
+        print(f"  Deduplicated {fb_dedup_count} feedback items with identical text")
 
     if fb_prompts:
         print(f"  Phase 1: {len(fb_prompts)} chunk prompts for {len(fb_chunk_counts)} feedback items")
@@ -540,7 +555,13 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
                 current_parts = next_parts
                 p2_chunk_groups = {}
 
-    print(f"  Feedback summaries: {len(feedback_summaries)}/{len(cluster_assignments)}")
+    # Copy summaries to deduplicated feedback IDs
+    for dup_id, canonical_id in fb_dedup_map.items():
+        if canonical_id in feedback_summaries:
+            feedback_summaries[dup_id] = feedback_summaries[canonical_id]
+
+    print(f"  Feedback summaries: {len(feedback_summaries)}/{len(cluster_assignments)}"
+          f"{f' ({fb_dedup_count} deduplicated)' if fb_dedup_count else ''}")
 
     # ── Phase 3: Bottom-up cluster summaries ──
 
