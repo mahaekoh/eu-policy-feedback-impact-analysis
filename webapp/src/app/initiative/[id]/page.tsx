@@ -47,13 +47,14 @@ export default async function InitiativePage({ params }: PageProps) {
   }
 
   let feedbackTimeline: number[] = [];
+  let timelineStartMs = startMs;
+  let timelineEndMs = startMs;
   if (feedbackDates.length > 0) {
-    let endMs = startMs;
     for (const t of feedbackDates) {
-      if (t > endMs) endMs = t;
+      if (t > timelineEndMs) timelineEndMs = t;
     }
-    if (endMs > startMs) {
-      const bucketWidth = (endMs - startMs) / TIMELINE_BUCKETS;
+    if (timelineEndMs > startMs) {
+      const bucketWidth = (timelineEndMs - startMs) / TIMELINE_BUCKETS;
       feedbackTimeline = new Array(TIMELINE_BUCKETS).fill(0);
       for (const t of feedbackDates) {
         const idx = Math.min(Math.floor((t - startMs) / bucketWidth), TIMELINE_BUCKETS - 1);
@@ -85,6 +86,8 @@ export default async function InitiativePage({ params }: PageProps) {
           initialClusterData={initialClusterData}
           initialScheme={clusterSchemes[0] ?? null}
           feedbackTimeline={feedbackTimeline}
+          timelineStartMs={timelineStartMs}
+          timelineEndMs={timelineEndMs}
           countryCounts={countryCounts}
           userTypeCounts={userTypeCounts}
         />

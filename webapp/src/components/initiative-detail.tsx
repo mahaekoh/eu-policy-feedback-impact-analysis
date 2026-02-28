@@ -44,6 +44,8 @@ interface InitiativeDetailProps {
   initialClusterData?: ClusterData | null;
   initialScheme?: string | null;
   feedbackTimeline?: number[];
+  timelineStartMs?: number;
+  timelineEndMs?: number;
   countryCounts?: Record<string, number>;
   userTypeCounts?: Record<string, number>;
 }
@@ -54,6 +56,8 @@ export function InitiativeDetail({
   initialClusterData = null,
   initialScheme = null,
   feedbackTimeline = [],
+  timelineStartMs = 0,
+  timelineEndMs = 0,
   countryCounts = {},
   userTypeCounts = {},
 }: InitiativeDetailProps) {
@@ -76,7 +80,8 @@ export function InitiativeDetail({
       if (
         p.feedback_status !== "OPEN" &&
         p.documents.length === 0 &&
-        p.feedback.length === 0
+        p.feedback.length === 0 &&
+        p.total_feedback === 0
       ) {
         empty.push(p);
       } else {
@@ -86,8 +91,17 @@ export function InitiativeDetail({
     return [active, empty];
   }, [initiative.publications]);
 
+  const multiplePubsWithFeedback = useMemo(
+    () => activePublications.filter((p) => p.feedback.length > 0).length > 1,
+    [activePublications]
+  );
+
   const totalFeedback = initiative.publications.reduce(
     (sum, p) => sum + p.total_feedback,
+    0
+  );
+  const fetchedFeedback = initiative.publications.reduce(
+    (sum, p) => sum + p.feedback.length,
     0
   );
 
@@ -101,17 +115,22 @@ export function InitiativeDetail({
       Object.entries(userTypeCounts).sort((a, b) => b[1] - a[1]) as [string, number][],
     [userTypeCounts]
   );
+  const scrapedFeedbackCount = useMemo(
+    () => sortedTypes.reduce((s, e) => s + e[1], 0),
+    [sortedTypes]
+  );
 
   // Collect all feedback items for cluster view
   const allFeedback = useMemo(() => {
-    const items: Feedback[] = [];
     // Prefer middle_feedback (from unit_summaries) which has combined_feedback_summary
     if (initiative.middle_feedback && initiative.middle_feedback.length > 0) {
-      items.push(...initiative.middle_feedback);
-    } else {
-      // Fallback to publications -> feedback
-      for (const pub of initiative.publications) {
-        items.push(...(pub.feedback || []));
+      return initiative.middle_feedback;
+    }
+    // Fallback to publications -> feedback
+    const items: Feedback[] = [];
+    for (const pub of initiative.publications) {
+      for (const fb of pub.feedback || []) {
+        items.push(fb);
       }
     }
     return items;
@@ -157,13 +176,13 @@ export function InitiativeDetail({
           </div>
         )}
 
-        {totalFeedback > 0 && (sortedCountries.length > 0 || sortedTypes.length > 0) && (
+        {scrapedFeedbackCount > 0 && (sortedCountries.length > 0 || sortedTypes.length > 0) && (
           <div className="flex flex-col gap-1 max-w-md mb-2">
             {sortedCountries.length > 0 && (
-              <CountryBar sortedCountries={sortedCountries} total={totalFeedback} />
+              <CountryBar sortedCountries={sortedCountries} total={scrapedFeedbackCount} />
             )}
             {sortedTypes.length > 0 && (
-              <UserTypeBar sortedTypes={sortedTypes} total={totalFeedback} />
+              <UserTypeBar sortedTypes={sortedTypes} total={scrapedFeedbackCount} />
             )}
           </div>
         )}
@@ -224,6 +243,16 @@ export function InitiativeDetail({
                   </span>
                 </div>
               </div>
+
+              {fetchedFeedback !== totalFeedback && (
+                <p className="text-xs text-muted-foreground">
+                  The API reports {totalFeedback.toLocaleString()} feedback
+                  {" "}but only {fetchedFeedback.toLocaleString()} were available
+                  {" "}for download.
+                  {totalFeedback - fetchedFeedback > 1000 &&
+                    " This is common for large public consultations where responses are collected via a separate survey tool."}
+                </p>
+              )}
 
               {initiative.topics.length > 0 && (
                 <div>
@@ -340,6 +369,10 @@ export function InitiativeDetail({
               key={pub.publication_id}
               publication={pub}
               defaultOpen={i === 0}
+              showBars={multiplePubsWithFeedback}
+              timelineStartMs={timelineStartMs}
+              timelineEndMs={timelineEndMs}
+              initiativeUrl={initiative.url}
             />
           ))}
           {emptyPublications.length > 0 && (

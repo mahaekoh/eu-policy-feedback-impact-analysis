@@ -119,8 +119,22 @@ rsync_from_remote() {
         "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
 }
 
+rsync_from_remote_exclude() {
+    local remote_path="$1" local_path="$2"
+    shift 2
+    local excludes=()
+    for pat in "$@"; do
+        excludes+=(--exclude "$pat")
+    done
+    mkdir -p "$(dirname "$local_path")"
+    rsync -avz --ignore-existing "${excludes[@]}" -e "ssh -i ${SSH_KEY}" \
+        "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
+}
+
 # Parse a scheme name like "agglomerative_google_embeddinggemma-300m_k1=v1_k2=v2"
 # into algorithm, model, and key=value parameters.
+# Multi-word keys like "max_cluster_size=20" are reassembled from underscore-split
+# parts by accumulating until a part contains "=".
 parse_scheme() {
     local scheme="$1"
     local IFS="_"
@@ -131,11 +145,32 @@ parse_scheme() {
     # Model name contains a slash: "google/embeddinggemma-300m"
     SCHEME_MODEL="${parts[1]}/${parts[2]}"
 
-    SCHEME_FLAGS=()
+    # Reassemble key=value pairs: accumulate parts until one contains "="
+    local params=()
+    local accum=""
     for (( i=3; i<${#parts[@]}; i++ )); do
         local part="${parts[$i]}"
-        local key="${part%%=*}"
-        local val="${part#*=}"
+        if [[ "$part" == *=* ]]; then
+            if [ -n "$accum" ]; then
+                accum="${accum}_${part}"
+            else
+                accum="$part"
+            fi
+            params+=("$accum")
+            accum=""
+        else
+            if [ -n "$accum" ]; then
+                accum="${accum}_${part}"
+            else
+                accum="$part"
+            fi
+        fi
+    done
+
+    SCHEME_FLAGS=()
+    for param in "${params[@]}"; do
+        local key="${param%%=*}"
+        local val="${param#*=}"
         # Convert underscore-style to CLI flag: distance_threshold -> --distance-threshold
         local flag="--${key//_/-}"
         SCHEME_FLAGS+=("$flag" "$val")
@@ -300,7 +335,7 @@ do_pull() {
             ;;
         summaries)
             stage_start "pull document summaries"
-            rsync_from_remote data/analysis/summaries/ data/analysis/summaries/
+            rsync_from_remote_exclude data/analysis/summaries/ data/analysis/summaries/ '_batches*'
             stage_end "pull document summaries"
             ;;
         classification)
@@ -310,12 +345,12 @@ do_pull() {
             ;;
         cluster-summaries)
             stage_start "pull cluster summaries"
-            rsync_from_remote data/cluster_summaries/ data/cluster_summaries/
+            rsync_from_remote_exclude data/cluster_summaries/ data/cluster_summaries/ '_batches*'
             stage_end "pull cluster summaries"
             ;;
         change-summaries)
             stage_start "pull change summaries"
-            rsync_from_remote data/analysis/change_summaries/ data/analysis/change_summaries/
+            rsync_from_remote_exclude data/analysis/change_summaries/ data/analysis/change_summaries/ '_batches*'
             stage_end "pull change summaries"
             ;;
         all)

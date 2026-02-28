@@ -16,7 +16,7 @@ interface FeedbackListProps {
 export function FeedbackList({ feedback }: FeedbackListProps) {
   const [search, setSearch] = useState("");
   const [activeTypes, setActiveTypes] = useState<Set<string>>(new Set());
-  const [hideEmpty, setHideEmpty] = useState(false);
+  const [hideEmpty, setHideEmpty] = useState(true);
   const [visibleCount, setVisibleCount] = useState(CHUNK_SIZE);
 
   const userTypes = useMemo(() => {
@@ -26,6 +26,16 @@ export function FeedbackList({ feedback }: FeedbackListProps) {
     }
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
   }, [feedback]);
+
+  const emptyCount = useMemo(
+    () =>
+      feedback.filter(
+        (f) =>
+          (!f.feedback_text || f.feedback_text.trim().length === 0) &&
+          (!f.attachments || f.attachments.length === 0)
+      ).length,
+    [feedback]
+  );
 
   const filtered = useMemo(() => {
     let result = feedback;
@@ -107,16 +117,18 @@ export function FeedbackList({ feedback }: FeedbackListProps) {
             }}
             className="w-full sm:w-[280px]"
           />
-          <Button
-            variant={hideEmpty ? "default" : "outline"}
-            size="sm"
-            onClick={() => {
-              setHideEmpty(!hideEmpty);
-              setVisibleCount(CHUNK_SIZE);
-            }}
-          >
-            {hideEmpty ? "Showing non-empty" : "Hide empty"}
-          </Button>
+          {emptyCount > 0 && (
+            <Button
+              variant={hideEmpty ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setHideEmpty(!hideEmpty);
+                setVisibleCount(CHUNK_SIZE);
+              }}
+            >
+              {hideEmpty ? `Show ${emptyCount} empty` : "Hide empty"}
+            </Button>
+          )}
           <span className="text-sm text-muted-foreground">
             {filtered.length} of {feedback.length} feedback
             {feedback.length !== 1 ? "s" : ""}

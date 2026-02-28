@@ -2,21 +2,11 @@ import fs from "fs";
 import path from "path";
 import { ClusterData, Initiative, InitiativeSummary } from "./types";
 
-const DATA_DIR = path.join(
-  process.cwd(),
-  "..",
-  "data",
-  "scrape",
-  "initiative_details"
-);
+const WEBAPP_DATA_DIR = path.join(process.cwd(), "..", "data", "webapp");
 
-const INDEX_PATH = path.join(
-  process.cwd(),
-  "..",
-  "data",
-  "webapp",
-  "initiative_index.json"
-);
+const DETAILS_DIR = path.join(WEBAPP_DATA_DIR, "initiative_details");
+
+const INDEX_PATH = path.join(WEBAPP_DATA_DIR, "initiative_index.json");
 
 const CLUSTERING_DIR = path.join(process.cwd(), "..", "data", "clustering");
 
@@ -41,7 +31,7 @@ export async function getInitiativeIndex(): Promise<InitiativeSummary[]> {
 export async function getInitiativeDetail(
   id: string
 ): Promise<Initiative | null> {
-  const filePath = path.join(DATA_DIR, `${id}.json`);
+  const filePath = path.join(DETAILS_DIR, `${id}.json`);
   if (!fs.existsSync(filePath)) return null;
 
   const content = fs.readFileSync(filePath, "utf-8");

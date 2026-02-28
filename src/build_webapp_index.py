@@ -1,9 +1,13 @@
-"""Pre-compute the webapp initiative index.
+"""Pre-compute the webapp initiative index and stripped initiative details.
 
 Reads all initiative detail JSONs from data/scrape/initiative_details/,
 extracts metadata, computes feedback statistics, deduplicates initiatives
 sharing identical feedback IDs, and writes a single JSON index file for
 the webapp to consume.
+
+Also writes stripped copies of each initiative detail JSON to
+data/webapp/initiative_details/, removing extracted_text fields from
+feedback attachments to keep file sizes manageable for the webapp.
 
 Usage:
     python3 src/build_webapp_index.py data/scrape/initiative_details/ -o data/webapp/initiative_index.json
@@ -125,6 +129,26 @@ def build_summary(data):
     }
 
 
+ATTACHMENT_TEXT_FIELDS = (
+    "extracted_text",
+    "extracted_text_without_ocr",
+    "extracted_text_before_translation",
+)
+
+
+def strip_large_text_fields(data):
+    """Remove bulky text fields not needed by the webapp."""
+    for pub in data.get("publications", []):
+        for fb in pub.get("feedback", []):
+            for att in fb.get("attachments", []):
+                for field in ATTACHMENT_TEXT_FIELDS:
+                    att.pop(field, None)
+    for fb in data.get("middle_feedback", []):
+        for att in fb.get("attachments", []):
+            for field in ATTACHMENT_TEXT_FIELDS:
+                att.pop(field, None)
+
+
 def deduplicate(summaries):
     """Deduplicate initiatives sharing identical sorted feedback ID sets.
 
@@ -175,6 +199,11 @@ def main():
         print(f"ERROR: {details_dir} is not a directory", file=sys.stderr)
         sys.exit(1)
 
+    # Stripped details directory sits next to the index file
+    output_dir = os.path.dirname(args.output) or "."
+    stripped_dir = os.path.join(output_dir, "initiative_details")
+    os.makedirs(stripped_dir, exist_ok=True)
+
     files = sorted(f for f in os.listdir(details_dir) if f.endswith(".json"))
     print(f"Processing {len(files)} initiative files...")
 
@@ -193,6 +222,12 @@ def main():
         summary = build_summary(data)
         if summary:
             summaries.append(summary)
+
+        # Write stripped copy (mutates data in-place, after summary is built)
+        strip_large_text_fields(data)
+        stripped_path = os.path.join(stripped_dir, filename)
+        with open(stripped_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
 
     print(f"Built {len(summaries)} summaries ({errors} errors)")
 

@@ -59,7 +59,7 @@ export function InitiativeCard({ initiative }: InitiativeCardProps) {
     .sort((a, b) => b[1] - a[1]) as [string, number][];
   const sortedTypes = Object.entries(initiative.user_type_counts)
     .sort((a, b) => b[1] - a[1]) as [string, number][];
-  const total = initiative.total_feedback;
+  const total = sortedTypes.reduce((s, e) => s + e[1], 0) || initiative.total_feedback;
   const timeline = initiative.feedback_timeline;
   const topics = initiative.topics;
   const stage = formatStage(initiative.stage);
