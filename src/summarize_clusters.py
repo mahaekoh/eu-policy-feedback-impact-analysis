@@ -129,9 +129,6 @@ def parse_title_and_summary(text: str) -> tuple[str, str]:
 
 
 
-
-
-
 def get_policy_text(initiative: dict) -> str:
     """Concatenate all publication document texts into a single policy text block."""
     parts = []

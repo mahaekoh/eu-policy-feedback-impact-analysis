@@ -67,9 +67,6 @@ FEEDBACK_COMBINE_PREFIX = (
 
 
 
-
-
-
 def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size):
     """Collect chunk-level prompts for a subset of initiative files.
 
