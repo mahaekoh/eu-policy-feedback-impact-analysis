@@ -26,6 +26,29 @@ def should_skip_text(text: str, label: str = "") -> bool:
     return False
 
 
+def group_by_char_budget(texts: list, max_chars: int) -> list:
+    """Group texts greedily so each group's combined length fits within max_chars."""
+    groups = []
+    current_group = []
+    current_len = 0
+    separator_len = 2  # "\n\n" between items
+
+    for text in texts:
+        added_len = len(text) + (separator_len if current_group else 0)
+        if current_group and current_len + added_len > max_chars:
+            groups.append(current_group)
+            current_group = [text]
+            current_len = len(text)
+        else:
+            current_group.append(text)
+            current_len += added_len
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
 def split_into_chunks(text: str, max_chars: int, label: str = "") -> list:
     """Split text into chunks of at most max_chars, breaking at sentence boundaries.
 

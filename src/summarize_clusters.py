@@ -30,12 +30,13 @@ from openai_harmony import (
 from vllm import LLM, SamplingParams
 
 from inference_utils import build_prefill, extract_final_texts, run_batch_inference
-from text_utils import should_skip_text, split_into_chunks
+from text_utils import group_by_char_budget, should_skip_text, split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
 MAX_MODEL_LEN = 32768 * 4
 CHUNK_SIZE = 16384
+COMBINE_BUDGET = CHUNK_SIZE * 4
 
 IDENTITY_PROMPT = (
     "You are a policy analyst who summarizes EU regulatory documents "
@@ -214,13 +215,13 @@ def get_depth(label: str) -> int:
 
 def summarize_single_text(text, prompt_prefix, combine_prefix, chunk_size,
                           encoding, reasoning_effort, llm, sampling_params,
-                          batch_size, batch_dir, summary_cache, max_combine,
+                          batch_size, batch_dir, summary_cache, combine_max_chars,
                           item_key, batch_num_start=0, label=""):
     """Handle chunking + combining for one text block. Returns (title, summary) or None.
 
     Runs Phase 1 (chunk-level) and Phase 2 (combining) for a single text item.
     """
-    if should_skip_text(text):
+    if should_skip_text(text, label=label):
         return None
 
     text = text.strip()
@@ -274,7 +275,7 @@ def summarize_single_text(text, prompt_prefix, combine_prefix, chunk_size,
 
     # Recursively combine
     title, summary = combine_summaries_recursive(
-        parts, combine_prefix, max_combine,
+        parts, combine_prefix, combine_max_chars,
         encoding, reasoning_effort, llm, sampling_params,
         batch_size, batch_dir, summary_cache,
         batch_num_start=batch_num, label=label,
@@ -282,7 +283,7 @@ def summarize_single_text(text, prompt_prefix, combine_prefix, chunk_size,
     return (title, summary)
 
 
-def combine_summaries_recursive(texts, combine_prefix, max_combine,
+def combine_summaries_recursive(texts, combine_prefix, combine_max_chars,
                                 encoding, reasoning_effort, llm, sampling_params,
                                 batch_size, batch_dir, summary_cache,
                                 batch_num_start=0, label=""):
@@ -293,7 +294,7 @@ def combine_summaries_recursive(texts, combine_prefix, max_combine,
 
     while len(current) > 1:
         combine_level += 1
-        groups = [current[i:i + max_combine] for i in range(0, len(current), max_combine)]
+        groups = group_by_char_budget(current, combine_max_chars)
 
         prompts = []
         prompt_texts = []
@@ -362,7 +363,7 @@ def find_feedback_by_id(initiative: dict) -> dict:
 
 
 def process_initiative(initiative, llm, sampling_params, encoding, reasoning_effort,
-                       batch_size, chunk_size, max_combine, output_dir, init_id):
+                       batch_size, chunk_size, combine_max_chars, output_dir, init_id):
     """Orchestrate all 3 phases for one initiative. Writes output JSON."""
     cluster_assignments = initiative.get("cluster_assignments", {})
     if not cluster_assignments:
@@ -384,11 +385,11 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
     print(f"\n  --- Policy summary ---")
     policy_text = get_policy_text(initiative)
     policy_summary = None
-    if policy_text and not should_skip_text(policy_text):
+    if policy_text and not should_skip_text(policy_text, label=f"init={init_id} policy"):
         result = summarize_single_text(
             policy_text, POLICY_SUMMARY_PREFIX, POLICY_COMBINE_PREFIX,
             chunk_size, encoding, reasoning_effort, llm, sampling_params,
-            batch_size, batch_dir_p1, summary_cache, max_combine,
+            batch_size, batch_dir_p1, summary_cache, combine_max_chars,
             item_key="policy", label="[POL] ",
         )
         if result:
@@ -418,11 +419,11 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
             continue
 
         text = get_feedback_text(fb)
-        if should_skip_text(text):
+        label = f"init={init_id} fb={feedback_id}"
+        if should_skip_text(text, label=label):
             continue
 
         text = text.strip()
-        label = f"init={init_id} fb={feedback_id}"
         chunks = split_into_chunks(text, chunk_size, label=label)
         fb_chunk_counts[feedback_id] = len(chunks)
 
@@ -486,7 +487,7 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
                 p2_map = []
 
                 for feedback_id, parts in current_parts.items():
-                    groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                    groups = group_by_char_budget(parts, combine_max_chars)
                     p2_chunk_groups[feedback_id] = groups
                     for gi, group in enumerate(groups):
                         if len(group) == 1:
@@ -615,8 +616,7 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
 
             label_texts[label] = texts_to_combine
             # Group for combining
-            groups = [texts_to_combine[i:i + max_combine]
-                      for i in range(0, len(texts_to_combine), max_combine)]
+            groups = group_by_char_budget(texts_to_combine, combine_max_chars)
             label_groups[label] = groups
 
             for gi, group in enumerate(groups):
@@ -681,7 +681,7 @@ def process_initiative(initiative, llm, sampling_params, encoding, reasoning_eff
             os.makedirs(p3_extra_dir, exist_ok=True)
 
             title, summary = combine_summaries_recursive(
-                parts, CLUSTER_COMBINE_PREFIX, max_combine,
+                parts, CLUSTER_COMBINE_PREFIX, combine_max_chars,
                 encoding, reasoning_effort, llm, sampling_params,
                 batch_size, p3_extra_dir, summary_cache,
                 label=f"[CL-{label}] ",
@@ -760,8 +760,8 @@ def main():
         help="Number of prompts per inference batch (default: 2048).",
     )
     parser.add_argument(
-        "--max-combine-chunks", type=int, default=4,
-        help="Max summaries to combine per inference call (default: 4).",
+        "--combine-budget", type=int, default=COMBINE_BUDGET,
+        help=f"Max chars when combining summaries per inference call (default: {COMBINE_BUDGET}).",
     )
     args = parser.parse_args()
 
@@ -858,9 +858,10 @@ def main():
         with open(filepath, encoding="utf-8") as f:
             initiative = json.load(f)
 
+        combine_max_chars = args.combine_budget
         process_initiative(
             initiative, llm, sampling_params, encoding, reasoning_effort,
-            args.batch_size, args.chunk_size, args.max_combine_chunks,
+            args.batch_size, args.chunk_size, combine_max_chars,
             args.output, init_id,
         )
 

@@ -32,11 +32,12 @@ from openai_harmony import (
 from vllm import LLM, SamplingParams
 
 from inference_utils import build_prefill, extract_final_texts, run_batch_inference
-from text_utils import should_skip_text, split_into_chunks
+from text_utils import group_by_char_budget, should_skip_text, split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
 CHUNK_SIZE = 16384
+COMBINE_BUDGET = CHUNK_SIZE * 4
 INITIATIVE_BATCH_SIZE = 128
 
 IDENTITY_PROMPT = (
@@ -93,13 +94,13 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
 
         # documents_before_feedback and documents_after_feedback
         for list_name in ("documents_before_feedback", "documents_after_feedback"):
+            init_id = filename.replace(".json", "")
             for doc_idx, doc in enumerate(initiative.get(list_name, [])):
                 text = doc.get("extracted_text", "")
-                if should_skip_text(text):
+                label = f"init={init_id} {list_name}[{doc_idx}] {doc.get('filename', '?')}"
+                if should_skip_text(text, label=label):
                     continue
                 text = text.strip()
-                init_id = filename.replace(".json", "")
-                label = f"init={init_id} {list_name}[{doc_idx}] {doc.get('filename', '?')}"
                 chunks = split_into_chunks(text, chunk_size, label=label)
                 item_chunk_counts[item_index] = len(chunks)
                 item_is_feedback[item_index] = False
@@ -130,10 +131,10 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
         for fb_idx, fb in enumerate(initiative.get("middle_feedback", [])):
             for att_idx, att in enumerate(fb.get("attachments", [])):
                 text = att.get("extracted_text", "")
-                if should_skip_text(text):
+                label = f"init={filename.replace('.json', '')} fb={fb.get('id', '?')} att={att.get('id', '?')}"
+                if should_skip_text(text, label=label):
                     continue
                 text = text.strip()
-                label = f"init={filename.replace('.json', '')} fb={fb.get('id', '?')} att={att.get('id', '?')}"
                 chunks = split_into_chunks(text, chunk_size, label=label)
                 item_chunk_counts[item_index] = len(chunks)
                 item_is_feedback[item_index] = True
@@ -233,8 +234,8 @@ def main():
         help="Number of prompts per inference batch (default: 2048).",
     )
     parser.add_argument(
-        "--max-combine-chunks", type=int, default=4,
-        help="Max summaries to combine per inference call in pass 2 (default: 4).",
+        "--combine-budget", type=int, default=COMBINE_BUDGET,
+        help=f"Max chars when combining summaries per inference call (default: {COMBINE_BUDGET}).",
     )
     parser.add_argument(
         "--initiative-batch-size", type=int, default=INITIATIVE_BATCH_SIZE,
@@ -388,20 +389,20 @@ def main():
               f"{len(current_parts)} multi-chunk items need combining")
 
         # === Pass 2: Recursively combine chunk summaries ===
-        max_combine = args.max_combine_chunks
+        combine_budget = args.combine_budget
         combine_level = 0
         batch_num_p2 = 0
 
         while current_parts:
             combine_level += 1
 
-            # Build prompts: for each item, group summaries into groups of <= max_combine
+            # Build prompts: for each item, group summaries by char budget
             p2_prompts = []
             p2_texts = []
             p2_prompt_map = []
 
             for item_idx, parts in current_parts.items():
-                chunk_groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                chunk_groups = group_by_char_budget(parts, combine_budget)
                 for gi, group in enumerate(chunk_groups):
                     if len(group) == 1:
                         # Single-element group: pass through without inference
@@ -431,7 +432,7 @@ def main():
             # Collect results into next level
             next_parts = {}
             for item_idx, parts in current_parts.items():
-                chunk_groups = [parts[i:i + max_combine] for i in range(0, len(parts), max_combine)]
+                chunk_groups = group_by_char_budget(parts, combine_budget)
                 new_parts = []
                 for gi, group in enumerate(chunk_groups):
                     if len(group) == 1:
