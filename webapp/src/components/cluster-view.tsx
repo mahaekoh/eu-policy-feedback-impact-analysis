@@ -12,10 +12,12 @@ import {
 import {
   ClusterData,
   ClusterNode,
+  ClusterSummaryEntry,
   Feedback,
   buildClusterTree,
 } from "@/lib/types";
 import { ClusterNodeComponent } from "@/components/cluster-node";
+import { ExpandableText } from "@/components/expandable-text";
 
 type ClusterSort = "size-desc" | "size-asc" | "id-asc";
 
@@ -116,15 +118,54 @@ export function ClusterView({
     return { startMs, endMs, buckets: SPARKLINE_BUCKETS };
   }, [allFeedback, publishedDate]);
 
+  // Extract cluster summaries lookup
+  const summaryLookup = useMemo(
+    () => clusterData.cluster_summaries?.cluster_summaries ?? {},
+    [clusterData.cluster_summaries]
+  );
+
+  const policySummary = clusterData.cluster_summaries?.policy_summary ?? null;
+
   // Build cluster tree
   const allClusters = useMemo(
     () => buildClusterTree(clusterData.cluster_assignments, feedbackLookup),
     [clusterData.cluster_assignments, feedbackLookup]
   );
 
+  // Promote unclustered feedback to individual top-level clusters:
+  // 1. Feedback not in cluster_assignments at all (any scheme)
+  // 2. HDBSCAN noise items (assigned to label -1)
+  const clustersWithUnclustered = useMemo(() => {
+    const assignedIds = new Set(Object.keys(clusterData.cluster_assignments));
+    const unassigned = allFeedback.filter(
+      (fb) => !assignedIds.has(String(fb.id))
+    );
+
+    // Split the noise cluster (label "-1") into singletons
+    let baseClusters = allClusters;
+    let noiseItems: Feedback[] = [];
+    const noiseIdx = allClusters.findIndex((c) => c.label === "-1");
+    if (noiseIdx >= 0) {
+      noiseItems = allClusters[noiseIdx].allItems;
+      baseClusters = allClusters.filter((_, i) => i !== noiseIdx);
+    }
+
+    const toPromote = [...unassigned, ...noiseItems];
+    if (toPromote.length === 0) return allClusters;
+
+    const singletons: ClusterNode[] = toPromote.map((fb) => ({
+      label: `unclustered.${fb.id}`,
+      directItems: [fb],
+      children: [],
+      allItems: [fb],
+    }));
+
+    return [...baseClusters, ...singletons];
+  }, [allClusters, allFeedback, clusterData.cluster_assignments]);
+
   // Filter and sort
   const filteredClusters = useMemo(() => {
-    let result = allClusters;
+    let result = clustersWithUnclustered;
 
     if (minSize > 1) {
       result = result.filter((c) => c.allItems.length >= minSize);
@@ -132,8 +173,12 @@ export function ClusterView({
 
     if (search) {
       const q = search.toLowerCase();
-      result = result.filter((c) =>
-        c.allItems.some((fb) => {
+      result = result.filter((c) => {
+        // Match on cluster summary title first
+        const title = summaryLookup[c.label]?.title;
+        if (title && title.toLowerCase().includes(q)) return true;
+        // Fall back to feedback content search
+        return c.allItems.some((fb) => {
           const hay = [
             fb.feedback_text,
             fb.organization,
@@ -146,8 +191,8 @@ export function ClusterView({
             .join(" ")
             .toLowerCase();
           return hay.includes(q);
-        })
-      );
+        });
+      });
     }
 
     result = [...result];
@@ -166,7 +211,7 @@ export function ClusterView({
     }
 
     return result;
-  }, [allClusters, sort, search, minSize]);
+  }, [clustersWithUnclustered, sort, search, minSize, summaryLookup]);
 
   const totalMatching = filteredClusters.reduce(
     (s, c) => s + c.allItems.length,
@@ -258,6 +303,18 @@ export function ClusterView({
         </div>
       </div>
 
+      {/* Policy summary */}
+      {policySummary && (
+        <div className="mb-4">
+          <ExpandableText
+            text={policySummary.summary}
+            label={policySummary.title}
+            maxPreviewChars={500}
+            isMarkdown
+          />
+        </div>
+      )}
+
       {/* Count */}
       <p className="text-sm text-muted-foreground mb-4">
         {filteredClusters.length} clusters &middot;{" "}
@@ -267,7 +324,12 @@ export function ClusterView({
       {/* Cluster list */}
       <div className="space-y-3">
         {filteredClusters.map((cluster) => (
-          <ClusterNodeComponent key={cluster.label} node={cluster} timeRange={timeRange} />
+          <ClusterNodeComponent
+            key={cluster.label}
+            node={cluster}
+            timeRange={timeRange}
+            summaryLookup={summaryLookup}
+          />
         ))}
       </div>
     </div>

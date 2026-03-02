@@ -98,6 +98,14 @@ run_remote() {
         return 1
     fi
 
+    # Clean up batch files after successful run
+    if [ -n "${REMOTE_BATCH_DIRS:-}" ]; then
+        echo "Cleaning up batch files..."
+        # shellcheck disable=SC2029
+        $SSH_CMD "cd ${REMOTE_DIR} && for pat in ${REMOTE_BATCH_DIRS}; do rm -rf \$pat 2>/dev/null && echo \"  Removed \$pat\" || true; done"
+        REMOTE_BATCH_DIRS=""
+    fi
+
     stage_end "remote $name"
 }
 
@@ -167,7 +175,7 @@ rsync_from_remote() {
         tmpfile=$(mktemp)
         rsync "${RSYNC_OPTS[@]}" --ignore-existing --list-only \
             "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" 2>/dev/null | \
-            awk '/^[^d]/ {print $NF}' | sort > "$tmpfile"
+            awk '/^-/ {print $NF}' | sort > "$tmpfile"
         parallel_rsync "$tmpfile" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" --ignore-existing
         rm -f "$tmpfile"
     else
@@ -193,7 +201,7 @@ rsync_from_remote_exclude() {
         tmpfile=$(mktemp)
         rsync "${RSYNC_OPTS[@]}" --ignore-existing "${excludes[@]}" --list-only \
             "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" 2>/dev/null | \
-            awk '/^[^d]/ {print $NF}' | sort > "$tmpfile"
+            awk '/^-/ {print $NF}' | sort > "$tmpfile"
         parallel_rsync "$tmpfile" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" --ignore-existing "${excludes[@]}"
         rm -f "$tmpfile"
     else
@@ -318,6 +326,7 @@ do_cluster() {
                 --algorithm "$SCHEME_ALGO" \
                 --model "$SCHEME_MODEL" \
                 --output-dir "$out_dir" \
+                --embeddings-cache-dir data/embeddings \
                 "${SCHEME_FLAGS[@]}" \
                 "$@"
     done
@@ -328,6 +337,26 @@ do_build_index() {
         $PYTHON src/build_webapp_index.py \
             data/scrape/initiative_details \
             -o data/webapp/initiative_index.json "$@"
+}
+
+do_merge_change_summaries() {
+    run_local "merge change summaries" \
+        $PYTHON src/merge_change_summaries.py \
+            data/analysis/change_summaries \
+            data/scrape/initiative_details "$@"
+}
+
+do_merge_cluster_feedback_summaries() {
+    if [ -z "$CLUSTER_SCHEMES" ]; then
+        echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+        exit 1
+    fi
+    for scheme in $CLUSTER_SCHEMES; do
+        run_local "merge cluster feedback summaries ($scheme)" \
+            $PYTHON src/merge_cluster_feedback_summaries.py \
+                "data/cluster_summaries/${scheme}" \
+                data/scrape/initiative_details "$@"
+    done
 }
 
 # ── Deploy / sync ────────────────────────────────────────────────────────────
@@ -418,6 +447,11 @@ do_pull() {
             rsync_from_remote data/clustering/ data/clustering/
             stage_end "pull clustering results"
             ;;
+        embeddings)
+            stage_start "pull embeddings cache"
+            rsync_from_remote data/embeddings/ data/embeddings/
+            stage_end "pull embeddings cache"
+            ;;
         cluster-summaries)
             stage_start "pull cluster summaries"
             rsync_from_remote_exclude data/cluster_summaries/ data/cluster_summaries/ '_batches*'
@@ -427,6 +461,13 @@ do_pull() {
             stage_start "pull change summaries"
             rsync_from_remote_exclude data/analysis/change_summaries/ data/analysis/change_summaries/ '_batches*'
             stage_end "pull change summaries"
+            ;;
+        logs)
+            stage_start "pull remote logs"
+            mkdir -p data/logs
+            rsync "${RSYNC_OPTS[@]}" \
+                "${REMOTE_HOST}:${REMOTE_DIR}/logs/" data/logs/
+            stage_end "pull remote logs"
             ;;
         all)
             do_pull ocr
@@ -439,7 +480,7 @@ do_pull() {
             ;;
         *)
             echo "ERROR: Unknown pull target: $target"
-            echo "Valid targets: ocr, translation, summaries, classification, clustering, cluster-summaries, change-summaries, all"
+            echo "Valid targets: ocr, translation, summaries, classification, clustering, embeddings, cluster-summaries, change-summaries, logs, all"
             exit 1
             ;;
     esac
@@ -456,16 +497,22 @@ do_remote() {
                 $PYTHON src/ocr_short_pdfs.py data/ocr/ "$@"
             ;;
         translate)
+            REMOTE_BATCH_DIRS="data/translation/non_english_attachments_translated_batches"
             run_remote "translate" \
                 $PYTHON src/translate_attachments.py \
                     data/translation/non_english_attachments.json \
                     -o data/translation/non_english_attachments_translated.json "$@"
             ;;
         summarize)
+            REMOTE_BATCH_DIRS="data/analysis/summaries/_batches_pass1 data/analysis/summaries/_batches_pass2"
+            local summarize_prev=""
+            if [ -d "data/analysis/summaries" ]; then
+                summarize_prev="--prev-output data/analysis/summaries"
+            fi
             run_remote "summarize" \
                 $PYTHON src/summarize_documents.py \
                     data/analysis/before_after/ \
-                    -o data/analysis/summaries/ "$@"
+                    -o data/analysis/summaries/ $summarize_prev "$@"
             ;;
         classify)
             run_remote "classify" \
@@ -478,15 +525,18 @@ do_remote() {
                 echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
                 exit 1
             fi
+            # cuML needs RAPIDS native libraries on LD_LIBRARY_PATH; unbuffered for live log output
+            local rapids_ld='export PYTHONUNBUFFERED=1; export LD_LIBRARY_PATH=$(python3 -c "import site,os,glob;ps=[os.path.expanduser(\"~/.local/lib/python3.10/site-packages\")];print(\":\".join(d for p in ps for d in glob.glob(os.path.join(p,\"lib*/lib64\"))))" 2>/dev/null):$LD_LIBRARY_PATH;'
             for scheme in $CLUSTER_SCHEMES; do
                 parse_scheme "$scheme"
                 local out_dir
                 out_dir="$(scheme_output_dir "$scheme")"
                 run_remote "cluster ($SCHEME_ALGO)" \
-                    $PYTHON src/cluster_all_initiatives.py \
+                    "$rapids_ld" $PYTHON src/cluster_all_initiatives.py \
                         --algorithm "$SCHEME_ALGO" \
                         --model "$SCHEME_MODEL" \
                         --output-dir "$out_dir" \
+                        --embeddings-cache-dir data/embeddings \
                         "${SCHEME_FLAGS[@]}" \
                         "$@"
             done
@@ -499,13 +549,19 @@ do_remote() {
             for scheme in $CLUSTER_SCHEMES; do
                 local cluster_dir="data/clustering/${scheme}"
                 local summary_dir="data/cluster_summaries/${scheme}"
+                REMOTE_BATCH_DIRS="data/cluster_summaries/${scheme}/_batches_p1_* data/cluster_summaries/${scheme}/_batches_p2_* data/cluster_summaries/${scheme}/_batches_p3_*"
+                local prev_arg=""
+                if [ -d "$summary_dir" ]; then
+                    prev_arg="--prev-output $summary_dir"
+                fi
                 run_remote "summarize-clusters ($scheme)" \
                     $PYTHON src/summarize_clusters.py \
                         "$cluster_dir" \
-                        -o "$summary_dir" "$@"
+                        -o "$summary_dir" $prev_arg "$@"
             done
             ;;
         summarize-changes)
+            REMOTE_BATCH_DIRS="data/analysis/change_summaries/_batches data/analysis/change_summaries/_batches_combine"
             run_remote "summarize-changes" \
                 $PYTHON src/summarize_changes.py \
                     data/analysis/unit_summaries/ \
@@ -555,6 +611,7 @@ do_full() {
     do_push unit-summaries
     do_remote cluster "$@"
     do_pull clustering
+    do_pull embeddings
 
     # Build webapp index from clustering results
     do_build_index "$@"
@@ -562,13 +619,15 @@ do_full() {
     # Push for remote cluster summarization
     do_push clustering
 
-    # Remote cluster summarization -> pull
+    # Remote cluster summarization -> pull -> merge into initiative_details
     do_remote summarize-clusters "$@"
     do_pull cluster-summaries
+    do_merge_cluster_feedback_summaries "$@"
 
-    # Remote change summarization -> pull
+    # Remote change summarization -> pull -> merge into initiative_details
     do_remote summarize-changes "$@"
     do_pull change-summaries
+    do_merge_change_summaries "$@"
 
     echo ""
     echo "============================================================"
@@ -603,7 +662,7 @@ do_logs() {
                 $SSH_CMD "tail -n 20 -f \$(ls -t ${REMOTE_DIR}/logs/${pattern}*.log 2>/dev/null | head -1)"
             fi
             ;;
-        ocr|translate|summarize|classify|summarize-clusters|summarize-changes)
+        ocr|translate|summarize|classify|cluster|summarize-clusters|summarize-changes)
             local pattern
             pattern="$(echo "$target" | tr ' ()' '_')"
             echo "Tailing most recent '$target' log..."
@@ -648,8 +707,10 @@ Full pipeline (./pipeline.sh full):
   22  push clustering           Push clustering data to remote
   23  remote summarize-clusters Run GPU cluster summarization on remote
   24  pull cluster-summaries    Pull cluster summaries back
-  25  remote summarize-changes  Run GPU change summarization on remote
-  26  pull change-summaries     Pull change summaries back
+  25  merge-cluster-feedback-summaries  Merge feedback summaries into initiative_details
+  26  remote summarize-changes  Run GPU change summarization on remote
+  27  pull change-summaries     Pull change summaries back
+  28  merge-change-summaries    Merge change summaries into initiative_details
 
 Other commands:
   cluster                  Cluster all initiatives locally (per configured schemes)
@@ -657,6 +718,7 @@ Other commands:
   pull classification      Pull classification results back
   clean-batches <target>   Delete batch files on remote (summaries, cluster-summaries,
                            change-summaries, translation, all)
+  pull logs               Pull all remote logs to data/logs/
   logs                     List recent remote logs
   logs tail [step]         Tail most recent log (optionally filtered by step name)
 
@@ -727,6 +789,8 @@ case "$STAGE" in
     build-summaries)    do_build_summaries "$@" ;;
     cluster)            do_cluster "$@" ;;
     build-index)        do_build_index "$@" ;;
+    merge-change-summaries) do_merge_change_summaries "$@" ;;
+    merge-cluster-feedback-summaries) do_merge_cluster_feedback_summaries "$@" ;;
     deploy)             do_deploy ;;
     push)               do_push "$@" ;;
     pull)               do_pull "$@" ;;

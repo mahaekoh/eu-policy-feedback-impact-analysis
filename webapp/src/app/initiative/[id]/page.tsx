@@ -64,6 +64,12 @@ export default async function InitiativePage({ params }: PageProps) {
   }
 
   const clusterSchemes = await getClusteringSchemesForInitiative(id);
+  // Prefer hdbscan schemes first
+  clusterSchemes.sort((a, b) => {
+    const aH = a.startsWith("hdbscan") ? 0 : 1;
+    const bH = b.startsWith("hdbscan") ? 0 : 1;
+    return aH - bH || a.localeCompare(b);
+  });
 
   // Pre-load the first scheme's cluster data if available
   const initialClusterData =

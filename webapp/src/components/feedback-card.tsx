@@ -5,9 +5,10 @@ import { ExpandableText } from "@/components/expandable-text";
 
 interface FeedbackCardProps {
   feedback: Feedback;
+  duplicateCount?: number;
 }
 
-export function FeedbackCard({ feedback }: FeedbackCardProps) {
+export function FeedbackCard({ feedback, duplicateCount }: FeedbackCardProps) {
   const colors = getUserTypeColor(feedback.user_type);
 
   const submitter = [feedback.organization, feedback.first_name, feedback.surname]
@@ -20,6 +21,11 @@ export function FeedbackCard({ feedback }: FeedbackCardProps) {
         <Badge className={`${colors.bg} ${colors.text} border-0`}>
           {formatUserType(feedback.user_type)}
         </Badge>
+        {duplicateCount && duplicateCount > 1 && (
+          <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 px-1.5 py-px rounded-lg">
+            {duplicateCount}x identical
+          </span>
+        )}
         {feedback.country && (
           <span className="text-xs text-muted-foreground">
             {feedback.country}

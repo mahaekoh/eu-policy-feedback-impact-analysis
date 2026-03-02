@@ -115,6 +115,49 @@ export interface InitiativeSummary {
   feedback_ids: number[];
 }
 
+export interface GlobalStats {
+  total_initiatives: number;
+  total_feedback: number;
+  by_country: [string, number][];
+  by_topic: [string, number][];
+  initiatives_by_topic: [string, number][];
+  by_user_type: [string, number][];
+  by_department: [string, number][];
+  by_stage: [string, number][];
+  top_topics_by_country: Record<string, [string, number][]>;
+  top_countries_by_topic: Record<string, [string, number][]>;
+  feedback_by_month: [string, number][];
+  feedback_by_month_by_topic: TimeSeriesGroup;
+  feedback_by_month_by_country: TimeSeriesGroup;
+}
+
+export interface TimeSeriesGroup {
+  months: string[];
+  series: Record<string, number[]>;
+}
+
+export interface CountryStatsEntry {
+  total_feedback: number;
+  by_topic: [string, number][];
+  by_user_type: [string, number][];
+  top_initiatives: { id: number; short_title: string; count: number }[];
+  recent_feedback: {
+    date: string;
+    user_type: string;
+    organization: string | null;
+    first_name: string | null;
+    surname: string | null;
+    initiative_id: number;
+    initiative_title: string;
+    feedback_text: string | null;
+    url: string | null;
+    attachments: { filename: string; download_url: string }[];
+  }[];
+  topic_timeline: TimeSeriesGroup;
+}
+
+export type CountryStats = Record<string, CountryStatsEntry>;
+
 export type SortOption =
   | "most_discussed"
   | "recently_discussed"
@@ -148,6 +191,16 @@ export function formatUserType(userType: string): string {
 
 // --- Clustering types ---
 
+export interface ClusterSummaryEntry {
+  title: string;
+  summary: string;
+}
+
+export interface ClusterSummaries {
+  policy_summary: ClusterSummaryEntry | null;
+  cluster_summaries: Record<string, ClusterSummaryEntry>;
+}
+
 export interface ClusterData {
   cluster_model: string;
   cluster_algorithm: string;
@@ -156,6 +209,7 @@ export interface ClusterData {
   cluster_noise_count: number;
   cluster_silhouette: number | null;
   cluster_assignments: Record<string, string | number>;
+  cluster_summaries?: ClusterSummaries | null;
 }
 
 export interface ClusterNode {

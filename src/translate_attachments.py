@@ -415,7 +415,11 @@ def main():
     for rec in records:
         rec["extracted_text_translated"] = None
 
+    n_stale = 0
     for rec_idx, chunks_dict in translated_chunks.items():
+        if rec_idx not in record_chunk_counts:
+            n_stale += 1
+            continue
         n_chunks = record_chunk_counts[rec_idx]
         parts = []
         for ci in range(n_chunks):
@@ -434,6 +438,8 @@ def main():
 
     translated = sum(1 for r in records if r.get("extracted_text_translated"))
     print(f"\nDone. Translated {translated}/{total} records.")
+    if n_stale:
+        print(f"  ({n_stale} stale batch entries skipped — input file changed since batches were created)")
     print(f"Batch files: {batch_dir}/ ({batch_num} files)")
     print(f"Combined output: {args.output}")
 

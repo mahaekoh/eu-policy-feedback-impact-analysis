@@ -636,7 +636,7 @@ def extract_initiative(
 
     old_pubs = old_record.get("publications") if old_record else None
 
-    return {
+    record = {
         "id": init_id,
         "url": url,
         "short_title": data.get("shortTitle", ""),
@@ -656,6 +656,14 @@ def extract_initiative(
             page_executor=page_executor,
         ),
     }
+
+    # Preserve top-level derived fields from previous scrape
+    if old_record is not None:
+        for key in old_record:
+            if key not in record:
+                record[key] = old_record[key]
+
+    return record
 
 
 def _retry_extraction_errors(out_path: Path):

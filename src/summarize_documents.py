@@ -68,8 +68,12 @@ FEEDBACK_COMBINE_PREFIX = (
 
 
 
-def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size):
+def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size,
+                    prev_output_dir=None):
     """Collect chunk-level prompts for a subset of initiative files.
+
+    If prev_output_dir is set, loads previous output for each file and carries
+    forward existing summary fields, so items with unchanged summaries are skipped.
 
     Returns:
         prompts: list of {"prompt_token_ids": [...]}
@@ -87,15 +91,38 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
     item_is_feedback = {}
 
     item_index = 0
+    skipped_existing = 0
     for filename in filenames:
         filepath = os.path.join(input_dir, filename)
         with open(filepath, encoding="utf-8") as f:
             initiative = json.load(f)
 
+        # Carry forward summaries from previous output if available
+        if prev_output_dir:
+            prev_path = os.path.join(prev_output_dir, filename)
+            if os.path.isfile(prev_path):
+                with open(prev_path, encoding="utf-8") as f:
+                    prev = json.load(f)
+                for list_name in ("documents_before_feedback", "documents_after_feedback"):
+                    for doc_idx, doc in enumerate(initiative.get(list_name, [])):
+                        prev_docs = prev.get(list_name, [])
+                        if doc_idx < len(prev_docs) and prev_docs[doc_idx].get("summary"):
+                            doc["summary"] = prev_docs[doc_idx]["summary"]
+                for fb_idx, fb in enumerate(initiative.get("middle_feedback", [])):
+                    prev_fbs = prev.get("middle_feedback", [])
+                    if fb_idx < len(prev_fbs):
+                        for att_idx, att in enumerate(fb.get("attachments", [])):
+                            prev_atts = prev_fbs[fb_idx].get("attachments", [])
+                            if att_idx < len(prev_atts) and prev_atts[att_idx].get("summary"):
+                                att["summary"] = prev_atts[att_idx]["summary"]
+
         # documents_before_feedback and documents_after_feedback
         for list_name in ("documents_before_feedback", "documents_after_feedback"):
             init_id = filename.replace(".json", "")
             for doc_idx, doc in enumerate(initiative.get(list_name, [])):
+                if doc.get("summary"):
+                    skipped_existing += 1
+                    continue
                 text = doc.get("extracted_text", "")
                 label = f"init={init_id} {list_name}[{doc_idx}] {doc.get('filename', '?')}"
                 if should_skip_text(text, label=label):
@@ -130,6 +157,9 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
         # middle_feedback -> attachments
         for fb_idx, fb in enumerate(initiative.get("middle_feedback", [])):
             for att_idx, att in enumerate(fb.get("attachments", [])):
+                if att.get("summary"):
+                    skipped_existing += 1
+                    continue
                 text = att.get("extracted_text", "")
                 label = f"init={filename.replace('.json', '')} fb={fb.get('id', '?')} att={att.get('id', '?')}"
                 if should_skip_text(text, label=label):
@@ -163,6 +193,9 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
                     chunk_texts.append(chunk)
                     prompt_map.append((item_index, ci))
                 item_index += 1
+
+    if skipped_existing:
+        print(f"  Skipped {skipped_existing} items with existing summaries")
 
     return (prompts, chunk_texts, prompt_map, item_locations,
             item_chunk_counts, item_is_feedback)
@@ -240,6 +273,11 @@ def main():
     parser.add_argument(
         "--initiative-batch-size", type=int, default=INITIATIVE_BATCH_SIZE,
         help=f"Number of initiative files to load at a time (default: {INITIATIVE_BATCH_SIZE}).",
+    )
+    parser.add_argument(
+        "--prev-output", type=str, default=None,
+        help="Previous output directory to reuse summaries from. "
+             "Items with existing summaries are skipped.",
     )
     args = parser.parse_args()
 
@@ -327,7 +365,8 @@ def main():
         # Collect prompts for this group
         (prompts, chunk_texts, prompt_map, item_locations,
          item_chunk_counts, item_is_feedback) = collect_prompts(
-            args.input_dir, group_files, encoding, reasoning_effort, args.chunk_size
+            args.input_dir, group_files, encoding, reasoning_effort, args.chunk_size,
+            prev_output_dir=args.prev_output,
         )
 
         n_prompts = len(prompts)

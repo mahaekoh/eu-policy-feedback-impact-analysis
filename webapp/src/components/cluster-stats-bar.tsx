@@ -58,7 +58,7 @@ export function CountryBar({ sortedCountries, total }: CountryBarProps) {
 
   return (
     <div className="flex-1 min-w-0">
-      <div className="flex h-[22px] overflow-hidden rounded bg-gray-100">
+      <div className="flex h-[22px] overflow-hidden rounded bg-gray-100 opacity-80">
         {sortedCountries.map(([code, count], idx) => (
           <BarSegment
             key={code}
@@ -90,7 +90,7 @@ interface UserTypeBarProps {
 export function UserTypeBar({ sortedTypes, total }: UserTypeBarProps) {
   return (
     <div className="flex-1 min-w-0">
-      <div className="flex h-[22px] overflow-hidden rounded bg-gray-100">
+      <div className="flex h-[22px] overflow-hidden rounded bg-gray-100 opacity-80">
         {sortedTypes.map(([ut, count]) => (
           <BarSegment
             key={ut}

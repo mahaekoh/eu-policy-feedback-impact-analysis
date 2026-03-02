@@ -22,18 +22,26 @@ Usage:
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
 import time
 
-import hdbscan
+import hdbscan as hdbscan_cpu
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering as AgglomerativeClustering_CPU
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
+
+try:
+    from cuml.cluster import AgglomerativeClustering as AgglomerativeClustering_GPU
+    from cuml.cluster import HDBSCAN as HDBSCAN_GPU
+    HAS_CUML = True
+except ImportError:
+    HAS_CUML = False
 
 
 # ── Defaults ───────────────────────────────────────────────────────────────
@@ -81,6 +89,12 @@ def parse_args():
                    help="Maximum recursion depth for sub-clustering")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip initiatives whose output file already exists")
+    p.add_argument("--embeddings-cache-dir", default=None,
+                   help="Directory to cache embeddings per initiative+model (speeds up re-runs)")
+    p.add_argument("--cpu-cluster", action="store_true",
+                   help="Force CPU clustering even if cuML is available")
+    p.add_argument("--max-items", type=int, default=0,
+                   help="Skip initiatives with more feedback items than this (0=no limit)")
     return p.parse_args()
 
 
@@ -113,8 +127,43 @@ def load_feedback(initiative):
     return rows
 
 
+def _make_agglomerative(distance_threshold, linkage, use_gpu):
+    """Create an agglomerative clustering instance (CPU only).
+
+    cuML's AgglomerativeClustering doesn't support distance_threshold or
+    average linkage, so agglomerative always uses sklearn on CPU.
+    The expensive part (embedding) is already done on GPU.
+    """
+    return AgglomerativeClustering_CPU(
+        n_clusters=None,
+        distance_threshold=distance_threshold,
+        linkage=linkage,
+    )
+
+
+def _make_hdbscan(min_cluster_size, min_samples, n_samples, use_gpu):
+    """Create an HDBSCAN instance (GPU or CPU).
+
+    Clamps min_cluster_size and min_samples to n_samples so cuML doesn't
+    crash on small initiatives.
+    """
+    mcs = min(min_cluster_size, n_samples)
+    ms = min(min_samples, n_samples)
+    if use_gpu:
+        return HDBSCAN_GPU(min_cluster_size=mcs, min_samples=ms)
+    return hdbscan_cpu.HDBSCAN(min_cluster_size=mcs, min_samples=ms)
+
+
+def _fit_predict(clusterer, embeddings):
+    """Run fit_predict and return numpy labels."""
+    labels = clusterer.fit_predict(embeddings)
+    if hasattr(labels, "get"):  # cupy array
+        labels = labels.get()
+    return np.asarray(labels)
+
+
 def cluster_recursive(indices, embeddings, base_dt, linkage, scale, max_size,
-                      max_depth, depth, prefix):
+                      max_depth, depth, prefix, use_gpu=False):
     """Recursively cluster a subset of embeddings.
 
     Args:
@@ -127,6 +176,7 @@ def cluster_recursive(indices, embeddings, base_dt, linkage, scale, max_size,
         max_depth: maximum recursion depth
         depth: current depth (0-based)
         prefix: label prefix for this level (e.g. "3" or "3.1")
+        use_gpu: use cuML GPU clustering
 
     Returns:
         dict mapping index -> hierarchical label string
@@ -138,12 +188,8 @@ def cluster_recursive(indices, embeddings, base_dt, linkage, scale, max_size,
     if dt <= 0 or len(indices) < 2:
         return {idx: prefix for idx in indices}
 
-    ag = AgglomerativeClustering(
-        n_clusters=None,
-        distance_threshold=dt,
-        linkage=linkage,
-    )
-    sub_labels = ag.fit_predict(sub_emb)
+    ag = _make_agglomerative(dt, linkage, use_gpu)
+    sub_labels = _fit_predict(ag, sub_emb)
 
     # If clustering didn't split (everything in one cluster), just return as-is
     if len(set(sub_labels)) <= 1:
@@ -159,7 +205,7 @@ def cluster_recursive(indices, embeddings, base_dt, linkage, scale, max_size,
             # Recurse
             sub_assignments = cluster_recursive(
                 cl_indices, embeddings, base_dt, linkage, scale,
-                max_size, max_depth, depth + 1, label,
+                max_size, max_depth, depth + 1, label, use_gpu,
             )
             assignments.update(sub_assignments)
         else:
@@ -170,7 +216,7 @@ def cluster_recursive(indices, embeddings, base_dt, linkage, scale, max_size,
 
 
 def cluster_recursive_hdbscan(indices, embeddings, min_cluster_size, min_samples,
-                               max_size, max_depth, depth, prefix):
+                               max_size, max_depth, depth, prefix, use_gpu=False):
     """Recursively cluster a subset of embeddings using HDBSCAN.
 
     Noise items at sub-levels are absorbed back into the parent cluster
@@ -185,6 +231,7 @@ def cluster_recursive_hdbscan(indices, embeddings, min_cluster_size, min_samples
         max_depth: maximum recursion depth
         depth: current depth (0-based)
         prefix: label prefix for this level (e.g. "3" or "3.1")
+        use_gpu: use cuML GPU clustering
 
     Returns:
         dict mapping index -> hierarchical label string
@@ -194,11 +241,8 @@ def cluster_recursive_hdbscan(indices, embeddings, min_cluster_size, min_samples
     if len(indices) < 2 or len(indices) < min_cluster_size:
         return {idx: prefix for idx in indices}
 
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min(min_samples, len(indices) - 1),
-    )
-    sub_labels = clusterer.fit_predict(sub_emb)
+    clusterer = _make_hdbscan(min_cluster_size, min_samples, len(indices), use_gpu)
+    sub_labels = _fit_predict(clusterer, sub_emb)
 
     unique_clusters = sorted(set(sub_labels) - {-1})
 
@@ -221,7 +265,7 @@ def cluster_recursive_hdbscan(indices, embeddings, min_cluster_size, min_samples
         if len(cl_indices) > max_size and depth < max_depth:
             sub_assignments = cluster_recursive_hdbscan(
                 cl_indices, embeddings, min_cluster_size, min_samples,
-                max_size, max_depth, depth + 1, label,
+                max_size, max_depth, depth + 1, label, use_gpu,
             )
             assignments.update(sub_assignments)
         else:
@@ -280,16 +324,45 @@ def save_clustering(initiative, initiative_id, rows, assignments, embeddings,
     return out_path
 
 
-def cluster_initiative(initiative, init_id, rows, embeddings, args, params):
+def hash_texts(texts):
+    """Return list of SHA256 hex digests for each text."""
+    return [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
+
+
+def load_cached_embeddings(cache_dir, model_name, init_id, text_hashes):
+    """Try to load cached embeddings. Returns embeddings array or None."""
+    model_safe = model_name.replace("/", "_")
+    cache_path = os.path.join(cache_dir, model_safe, f"{init_id}.npz")
+    if not os.path.exists(cache_path):
+        return None
+    try:
+        data = np.load(cache_path, allow_pickle=True)
+        cached_hashes = list(data["text_hashes"])
+        if cached_hashes == text_hashes:
+            return data["embeddings"]
+    except Exception:
+        pass
+    return None
+
+
+def save_cached_embeddings(cache_dir, model_name, init_id, text_hashes, embeddings):
+    """Save embeddings and text hashes to cache."""
+    model_safe = model_name.replace("/", "_")
+    out_dir = os.path.join(cache_dir, model_safe)
+    os.makedirs(out_dir, exist_ok=True)
+    cache_path = os.path.join(out_dir, f"{init_id}.npz")
+    np.savez_compressed(cache_path,
+                        text_hashes=np.array(text_hashes, dtype=object),
+                        embeddings=embeddings)
+
+
+def cluster_initiative(initiative, init_id, rows, embeddings, args, params, use_gpu=False):
     """Cluster a single initiative and save results. Returns (out_path, summary_str)."""
     all_indices = np.arange(len(rows))
 
     if args.algorithm == "hdbscan":
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=args.min_cluster_size,
-            min_samples=args.min_samples,
-        )
-        top_labels = clusterer.fit_predict(embeddings)
+        clusterer = _make_hdbscan(args.min_cluster_size, args.min_samples, len(rows), use_gpu)
+        top_labels = _fit_predict(clusterer, embeddings)
 
         noise_mask = top_labels == -1
         n_noise = int(noise_mask.sum())
@@ -311,7 +384,7 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params):
                 sub_assignments = cluster_recursive_hdbscan(
                     cl_indices, embeddings, args.min_cluster_size,
                     args.min_samples, args.max_cluster_size,
-                    args.max_depth, 1, label,
+                    args.max_depth, 1, label, use_gpu,
                 )
                 assignments.update(sub_assignments)
                 if len(set(sub_assignments.values())) > 1:
@@ -331,12 +404,8 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params):
                    f"({n_noise} noise) -> {n_final} final ({sub_clustered} sub-clustered)")
 
     else:
-        ag = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=args.distance_threshold,
-            linkage=args.linkage,
-        )
-        top_labels = ag.fit_predict(embeddings)
+        ag = _make_agglomerative(args.distance_threshold, args.linkage, use_gpu)
+        top_labels = _fit_predict(ag, embeddings)
         n_top = len(set(top_labels))
 
         assignments = {}
@@ -350,7 +419,7 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params):
                 sub_assignments = cluster_recursive(
                     cl_indices, embeddings, args.distance_threshold,
                     args.linkage, args.sub_cluster_scale, args.max_cluster_size,
-                    args.max_depth, 1, label,
+                    args.max_depth, 1, label, use_gpu,
                 )
                 assignments.update(sub_assignments)
                 if len(set(sub_assignments.values())) > 1:
@@ -379,7 +448,15 @@ def main():
     files = sorted(f for f in os.listdir(args.summaries_dir) if f.endswith(".json"))
     print(f"Found {len(files)} initiative files in {args.summaries_dir}/")
 
+    use_gpu = HAS_CUML and not args.cpu_cluster
     print(f"Algorithm: {args.algorithm}")
+    if args.algorithm == "agglomerative":
+        backend = "sklearn (CPU) — cuML lacks distance_threshold support"
+    elif use_gpu:
+        backend = "cuML (GPU)"
+    else:
+        backend = "hdbscan (CPU)"
+    print(f"Clustering backend: {backend}")
     print(f"Sub-clustering: max_size={args.max_cluster_size}, max_depth={args.max_depth}")
     if args.algorithm == "agglomerative":
         print(f"  distance_threshold={args.distance_threshold}, linkage={args.linkage}, "
@@ -404,16 +481,23 @@ def main():
             "max_depth": args.max_depth,
         }
 
-    # ── Pass 1: load all initiatives, collect texts ──
+    # ── Pass 1: load all initiatives, check embedding cache ──
     print("\nPass 1: loading initiatives and collecting texts...")
     t_load = time.time()
 
-    # Each entry: (idx_in_files, init_id, initiative, rows, text_offset, text_count)
+    cache_dir = args.embeddings_cache_dir
+    if cache_dir:
+        print(f"  Embeddings cache: {cache_dir}")
+
+    # work_items: (init_id, initiative, rows, text_hashes, cached_embeddings_or_None)
     work_items = []
-    all_texts = []
+    # texts_to_encode: only texts that need encoding (not cached)
+    texts_to_encode = []
+    # encode_map: index into work_items -> (offset, count) into texts_to_encode
+    encode_map = {}
     skipped = 0
     errors = 0
-    total = len(files)
+    cache_hits = 0
 
     model_safe = args.model.replace("/", "_")
     param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -441,65 +525,107 @@ def main():
             skipped += 1
             continue
 
-        offset = len(all_texts)
-        texts = [r["combined_text"] for r in rows]
-        all_texts.extend(texts)
-        work_items.append((idx, init_id, initiative, rows, offset, len(texts)))
+        if args.max_items > 0 and len(rows) > args.max_items:
+            print(f"  SKIP {init_id}: {len(rows)} items exceeds --max-items={args.max_items}")
+            skipped += 1
+            continue
 
-    print(f"  {len(work_items)} initiatives to process, {len(all_texts)} texts to encode "
-          f"({skipped} skipped, {errors} errors) [{time.time() - t_load:.1f}s]")
+        texts = [r["combined_text"] for r in rows]
+        text_hashes = hash_texts(texts)
+
+        # Check embedding cache
+        cached_emb = None
+        if cache_dir:
+            cached_emb = load_cached_embeddings(cache_dir, args.model, init_id, text_hashes)
+
+        wi_idx = len(work_items)
+        work_items.append((init_id, initiative, rows, text_hashes, cached_emb))
+
+        if cached_emb is not None:
+            cache_hits += 1
+        else:
+            offset = len(texts_to_encode)
+            texts_to_encode.extend(texts)
+            encode_map[wi_idx] = (offset, len(texts))
+
+    n_to_encode = len(texts_to_encode)
+    print(f"  {len(work_items)} initiatives to process, {n_to_encode} texts to encode "
+          f"({cache_hits} cached, {skipped} skipped, {errors} errors) [{time.time() - t_load:.1f}s]")
 
     if not work_items:
         print("Nothing to do.")
         return
 
-    # ── Pass 2: batch-encode all texts ──
-    n_gpus = torch.cuda.device_count()
-    print(f"\nPass 2: encoding {len(all_texts)} texts (model={args.model}, gpus={n_gpus})...")
+    # ── Pass 2: batch-encode uncached texts ──
     t_enc = time.time()
+    encoded_embeddings = None
 
-    model = SentenceTransformer(args.model)
-    if n_gpus > 1:
-        pool = model.start_multi_process_pool(
-            [f"cuda:{i}" for i in range(n_gpus)]
-        )
-        all_embeddings = model.encode_multi_process(all_texts, pool, batch_size=256)
-        model.stop_multi_process_pool(pool)
+    if n_to_encode > 0:
+        n_gpus = torch.cuda.device_count()
+        print(f"\nPass 2: encoding {n_to_encode} texts (model={args.model}, gpus={n_gpus})...")
+
+        model = SentenceTransformer(args.model)
+        if n_gpus > 1:
+            pool = model.start_multi_process_pool(
+                [f"cuda:{i}" for i in range(n_gpus)]
+            )
+            encoded_embeddings = model.encode_multi_process(texts_to_encode, pool, batch_size=256)
+            model.stop_multi_process_pool(pool)
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = model.to(device)
+            encoded_embeddings = model.encode(texts_to_encode, show_progress_bar=True, batch_size=256)
+
+        encoded_embeddings = normalize(encoded_embeddings)
+
+        # Free model memory before clustering
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
-        all_embeddings = model.encode(all_texts, show_progress_bar=True, batch_size=256)
+        print("\nPass 2: all embeddings cached, skipping encoding.")
 
-    all_embeddings = normalize(all_embeddings)
     t_enc = time.time() - t_enc
     print(f"  Encoding done [{t_enc:.1f}s]")
 
-    # Free model memory before clustering
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # Save all newly-encoded embeddings to cache before clustering
+    # (so they survive if clustering crashes)
+    if cache_dir and n_to_encode > 0:
+        saved = 0
+        for i, (init_id, _initiative, _rows, text_hashes, cached_emb) in enumerate(work_items):
+            if cached_emb is None:
+                offset, count = encode_map[i]
+                embeddings = encoded_embeddings[offset:offset + count]
+                save_cached_embeddings(cache_dir, args.model, init_id, text_hashes, embeddings)
+                saved += 1
+        print(f"  Saved {saved} embedding caches to {cache_dir}")
 
     # ── Pass 3: cluster each initiative ──
     print(f"\nPass 3: clustering {len(work_items)} initiatives...")
     t_clust_total = time.time()
     processed = 0
 
-    for i, (idx, init_id, initiative, rows, offset, count) in enumerate(work_items, 1):
-        embeddings = all_embeddings[offset:offset + count]
+    for i, (init_id, initiative, rows, text_hashes, cached_emb) in enumerate(work_items):
+        if cached_emb is not None:
+            embeddings = cached_emb
+        else:
+            offset, count = encode_map[i]
+            embeddings = encoded_embeddings[offset:offset + count]
 
         t_clust = time.time()
         out_path, summary = cluster_initiative(
-            initiative, init_id, rows, embeddings, args, params,
+            initiative, init_id, rows, embeddings, args, params, use_gpu,
         )
         t_clust = time.time() - t_clust
 
         processed += 1
-        print(f"[{i}/{len(work_items)}] {init_id}: {summary} [{t_clust:.2f}s]")
+        print(f"[{processed}/{len(work_items)}] {init_id}: {summary} [{t_clust:.2f}s]")
 
     t_clust_total = time.time() - t_clust_total
     t_total = t_enc + t_clust_total
     print(f"\nDone in {t_total:.1f}s (encode={t_enc:.1f}s, cluster={t_clust_total:.1f}s). "
-          f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}")
+          f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}, "
+          f"Cache hits: {cache_hits}")
 
 
 if __name__ == "__main__":

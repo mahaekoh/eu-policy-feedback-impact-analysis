@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,9 +31,15 @@ export function InitiativeList({ initiatives }: InitiativeListProps) {
   const deptFilter = searchParams.get("dept") ?? "all";
   const topicFilter = searchParams.get("topic") ?? "all";
   const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
+  const [searchInput, setSearchInput] = useState(search);
   const [showAdvanced, setShowAdvanced] = useState(
     stageFilter !== "all" || deptFilter !== "all" || topicFilter !== "all"
   );
+
+  // Sync local input when URL param changes externally (e.g. browser back/forward)
+  useEffect(() => {
+    setSearchInput(search);
+  }, [search]);
 
   // Update URL search params (replaces current history entry for filter changes,
   // pushes for page changes so back button works across pages)
@@ -154,9 +160,14 @@ export function InitiativeList({ initiatives }: InitiativeListProps) {
           </Select>
 
           <Input
-            placeholder="Search initiatives..."
-            value={search}
-            onChange={(e) => setParams({ q: e.target.value, page: "1" })}
+            placeholder="Search initiatives… (press Enter)"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                setParams({ q: searchInput, page: "1" });
+              }
+            }}
             className="w-full sm:w-[280px]"
           />
 

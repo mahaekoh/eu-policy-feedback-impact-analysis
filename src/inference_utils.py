@@ -25,20 +25,28 @@ def build_prefill(
     prompt_prefix: str,
     reasoning_effort: ReasoningEffort,
     identity_prompt: str,
+    max_prompt_tokens: int | None = None,
 ) -> dict | None:
-    """Build a prompt_token_ids prefill dict for vLLM using openai_harmony."""
-    user_prompt = prompt_prefix + text
-    convo = Conversation.from_messages([
-        Message.from_role_and_content(
-            Role.SYSTEM,
-            SystemContent.new().with_conversation_start_date(
-                datetime.datetime.now().strftime('%Y-%m-%d %A')
-            ).with_reasoning_effort(reasoning_effort).with_model_identity(identity_prompt)
-        ),
-        Message.from_role_and_content(Role.USER, user_prompt),
-    ])
+    """Build a prompt_token_ids prefill dict for vLLM using openai_harmony.
+
+    If max_prompt_tokens is set and the rendered prompt exceeds it, the text
+    is progressively truncated (from the end) until it fits.
+    """
+    def _render(t):
+        convo = Conversation.from_messages([
+            Message.from_role_and_content(
+                Role.SYSTEM,
+                SystemContent.new().with_conversation_start_date(
+                    datetime.datetime.now().strftime('%Y-%m-%d %A')
+                ).with_reasoning_effort(reasoning_effort).with_model_identity(
+                    identity_prompt)
+            ),
+            Message.from_role_and_content(Role.USER, prompt_prefix + t),
+        ])
+        return encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+
     try:
-        prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+        prefill_ids = _render(text)
     except BaseException as e:
         print(f"ERROR in render_conversation_for_completion: {type(e).__name__}: {e}")
         print(f"  prompt_prefix: {prompt_prefix[:100]!r}")
@@ -46,6 +54,22 @@ def build_prefill(
         print(f"  text repr (first 500): {text[:500]!r}")
         print(f"  text repr (last 500):  {text[-500:]!r}")
         return None
+
+    if max_prompt_tokens and len(prefill_ids) > max_prompt_tokens:
+        original_tokens = len(prefill_ids)
+        while len(prefill_ids) > max_prompt_tokens:
+            excess = len(prefill_ids) - max_prompt_tokens
+            # ~4 chars per token, with 20% margin
+            chars_to_trim = max(int(excess * 4.8), 200)
+            if chars_to_trim >= len(text):
+                print(f"  ERROR: cannot truncate text enough to fit "
+                      f"({len(prefill_ids)} tokens > {max_prompt_tokens})")
+                return None
+            text = text[:-chars_to_trim]
+            prefill_ids = _render(text)
+        print(f"  WARNING: prompt truncated from {original_tokens} to "
+              f"{len(prefill_ids)} tokens (max {max_prompt_tokens})")
+
     return {"prompt_token_ids": prefill_ids}
 
 

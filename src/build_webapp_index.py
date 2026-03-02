@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 
 TIMELINE_BUCKETS = 20
@@ -59,6 +60,12 @@ def build_summary(data):
     country_counts = {}
     user_type_counts = {}
     feedback_dates = []
+    feedback_months = []
+    feedback_country_months = []
+
+    feedback_items = []
+
+    short_title = data.get("short_title", "")
 
     for pub in publications:
         for fb in pub.get("feedback", []):
@@ -81,6 +88,34 @@ def build_summary(data):
                 dt = parse_date(date)
                 if dt:
                     feedback_dates.append(dt)
+                    month = dt.strftime("%Y-%m")
+                    feedback_months.append(month)
+                    if country:
+                        feedback_country_months.append((country, month))
+
+            if country:
+                fb_text = fb.get("feedback_text") or ""
+                attachments = [
+                    {
+                        "filename": att.get("filename", ""),
+                        "download_url": att.get("download_url", ""),
+                    }
+                    for att in fb.get("attachments", [])
+                    if att.get("download_url")
+                ]
+                feedback_items.append({
+                    "country": country,
+                    "date": date or "",
+                    "user_type": user_type or "",
+                    "organization": fb.get("organization"),
+                    "first_name": fb.get("first_name"),
+                    "surname": fb.get("surname"),
+                    "initiative_id": init_id,
+                    "initiative_title": short_title,
+                    "feedback_text": fb_text[:150] if fb_text else None,
+                    "attachments": attachments,
+                    "url": fb.get("url") or None,
+                })
 
     feedback_ids.sort()
 
@@ -126,6 +161,9 @@ def build_summary(data):
         "last_feedback_date": last_feedback_date,
         "has_open_feedback": has_open_feedback,
         "feedback_ids": feedback_ids,
+        "_feedback_months": feedback_months,
+        "_feedback_country_months": feedback_country_months,
+        "_feedback_items": feedback_items,
     }
 
 
@@ -176,6 +214,207 @@ def deduplicate(summaries):
             seen[key] = i
 
     return [s for i, s in enumerate(summaries) if i not in remove]
+
+
+def _sorted_counts(counter, limit=None):
+    """Return a counter dict as a list of [key, count] pairs sorted desc."""
+    items = sorted(counter.items(), key=lambda x: x[1], reverse=True)
+    if limit:
+        items = items[:limit]
+    return [[k, v] for k, v in items]
+
+
+def _sorted_nested(nested, outer_limit=None, inner_limit=10):
+    """Sort a nested {key: counter} dict by outer total desc, inner desc."""
+    totals = {k: sum(v.values()) for k, v in nested.items()}
+    keys = sorted(totals, key=totals.get, reverse=True)
+    if outer_limit:
+        keys = keys[:outer_limit]
+    return {k: _sorted_counts(nested[k], inner_limit) for k in keys}
+
+
+def build_global_stats(summaries):
+    """Aggregate cross-initiative statistics from deduplicated summaries."""
+    total_initiatives = len(summaries)
+    total_feedback = 0
+    by_country = defaultdict(int)
+    by_topic = defaultdict(int)
+    initiatives_by_topic = defaultdict(int)
+    by_user_type = defaultdict(int)
+    by_department = defaultdict(int)
+    by_stage = defaultdict(int)
+    topic_by_country = defaultdict(lambda: defaultdict(int))
+    country_by_topic = defaultdict(lambda: defaultdict(int))
+    by_month = defaultdict(int)
+    # topic × month and country × month for time-series breakdowns
+    topic_month = defaultdict(lambda: defaultdict(int))
+    country_month = defaultdict(lambda: defaultdict(int))
+
+    for s in summaries:
+        total_feedback += s["total_feedback"]
+        topics = s.get("topics", [])
+        dept = s.get("department", "")
+        stage = s.get("stage", "")
+
+        if dept:
+            by_department[dept] += s["total_feedback"]
+        if stage:
+            by_stage[stage] += 1  # count initiatives, not feedback
+
+        for country, count in s["country_counts"].items():
+            by_country[country] += count
+            for topic in topics:
+                topic_by_country[country][topic] += count
+                country_by_topic[topic][country] += count
+
+        for ut, count in s["user_type_counts"].items():
+            by_user_type[ut] += count
+
+        for topic in topics:
+            by_topic[topic] += s["total_feedback"]
+            initiatives_by_topic[topic] += 1
+
+        for month in s.get("_feedback_months", []):
+            by_month[month] += 1
+            for topic in topics:
+                topic_month[topic][month] += 1
+
+        for country, month in s.get("_feedback_country_months", []):
+            country_month[country][month] += 1
+
+    # Build time-series with shared month axis, top 10 series each
+    all_months = sorted(by_month.keys())
+    top_topics = [t for t, _ in _sorted_counts(by_topic, limit=10)]
+    top_countries = [c for c, _ in _sorted_counts(by_country, limit=15)]
+
+    def _build_time_series(keys, month_data):
+        return {
+            "months": all_months,
+            "series": {
+                k: [month_data[k].get(m, 0) for m in all_months]
+                for k in keys
+            },
+        }
+
+    return {
+        "total_initiatives": total_initiatives,
+        "total_feedback": total_feedback,
+        "by_country": _sorted_counts(by_country),
+        "by_topic": _sorted_counts(by_topic),
+        "initiatives_by_topic": _sorted_counts(initiatives_by_topic),
+        "by_user_type": _sorted_counts(by_user_type),
+        "by_department": _sorted_counts(by_department),
+        "by_stage": _sorted_counts(by_stage),
+        "top_topics_by_country": _sorted_nested(topic_by_country),
+        "top_countries_by_topic": _sorted_nested(country_by_topic),
+        "feedback_by_month": sorted(by_month.items()),
+        "feedback_by_month_by_topic": _build_time_series(top_topics, topic_month),
+        "feedback_by_month_by_country": _build_time_series(top_countries, country_month),
+    }
+
+
+def build_country_stats(summaries, all_months):
+    """Build per-country statistics from deduplicated summaries."""
+    # Accumulate per-country data
+    country_data = defaultdict(lambda: {
+        "total_feedback": 0,
+        "topic_counts": defaultdict(int),
+        "user_type_counts": defaultdict(int),
+        "initiative_counts": defaultdict(int),
+        "initiative_titles": {},
+        "feedback_items": [],
+        "topic_month": defaultdict(lambda: defaultdict(int)),
+    })
+
+    for s in summaries:
+        topics = s.get("topics", [])
+        for item in s.get("_feedback_items", []):
+            country = item["country"]
+            cd = country_data[country]
+            cd["total_feedback"] += 1
+
+            for topic in topics:
+                cd["topic_counts"][topic] += 1
+
+            ut = item.get("user_type")
+            if ut:
+                cd["user_type_counts"][ut] += 1
+
+            init_id = item["initiative_id"]
+            cd["initiative_counts"][init_id] += 1
+            cd["initiative_titles"][init_id] = item["initiative_title"]
+
+            cd["feedback_items"].append(item)
+
+            date_str = item.get("date", "")
+            if date_str:
+                dt = parse_date(date_str)
+                if dt:
+                    month = dt.strftime("%Y-%m")
+                    for topic in topics:
+                        cd["topic_month"][topic][month] += 1
+
+    result = {}
+    for country, cd in country_data.items():
+        # Top 20 topics
+        by_topic = _sorted_counts(cd["topic_counts"], limit=20)
+
+        # All user types
+        by_user_type = _sorted_counts(cd["user_type_counts"])
+
+        # Top 20 initiatives
+        init_sorted = sorted(
+            cd["initiative_counts"].items(), key=lambda x: x[1], reverse=True
+        )[:20]
+        top_initiatives = [
+            {
+                "id": init_id,
+                "short_title": cd["initiative_titles"].get(init_id, ""),
+                "count": count,
+            }
+            for init_id, count in init_sorted
+        ]
+
+        # 20 most recent feedback
+        items_sorted = sorted(
+            cd["feedback_items"], key=lambda x: x.get("date", ""), reverse=True
+        )[:20]
+        recent_feedback = [
+            {
+                "date": it["date"],
+                "user_type": it["user_type"],
+                "organization": it.get("organization"),
+                "first_name": it.get("first_name"),
+                "surname": it.get("surname"),
+                "initiative_id": it["initiative_id"],
+                "initiative_title": it["initiative_title"],
+                "feedback_text": it.get("feedback_text"),
+                "url": it.get("url"),
+                "attachments": it.get("attachments", []),
+            }
+            for it in items_sorted
+        ]
+
+        # Topic timeline — top 5 topics over time
+        top_5_topics = [t for t, _ in _sorted_counts(cd["topic_counts"], limit=5)]
+        topic_timeline = {
+            "months": all_months,
+            "series": {
+                t: [cd["topic_month"][t].get(m, 0) for m in all_months]
+                for t in top_5_topics
+            },
+        }
+
+        result[country] = {
+            "total_feedback": cd["total_feedback"],
+            "by_topic": by_topic,
+            "by_user_type": by_user_type,
+            "top_initiatives": top_initiatives,
+            "recent_feedback": recent_feedback,
+            "topic_timeline": topic_timeline,
+        }
+
+    return result
 
 
 def main():
@@ -237,7 +476,18 @@ def main():
     if dupes:
         print(f"Removed {dupes} duplicates ({len(summaries)} remaining)")
 
-    # Sort by last_cached_at descending
+    # Build global stats before stripping temporary fields
+    global_stats = build_global_stats(summaries)
+
+    # Build country stats (needs _feedback_items + all_months from global stats)
+    all_months = [m for m, _ in global_stats["feedback_by_month"]]
+    country_stats = build_country_stats(summaries, all_months)
+
+    # Strip temporary fields and sort
+    for s in summaries:
+        s.pop("_feedback_months", None)
+        s.pop("_feedback_country_months", None)
+        s.pop("_feedback_items", None)
     summaries.sort(
         key=lambda s: s["last_cached_at"] or "", reverse=True
     )
@@ -248,6 +498,22 @@ def main():
 
     size_mb = os.path.getsize(args.output) / (1024 * 1024)
     print(f"Wrote {args.output} ({size_mb:.1f} MB)")
+
+    # Write global stats alongside the index
+    stats_path = os.path.join(output_dir, "global_stats.json")
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(global_stats, f, ensure_ascii=False)
+
+    stats_mb = os.path.getsize(stats_path) / (1024 * 1024)
+    print(f"Wrote {stats_path} ({stats_mb:.1f} MB)")
+
+    # Write per-country stats
+    country_stats_path = os.path.join(output_dir, "country_stats.json")
+    with open(country_stats_path, "w", encoding="utf-8") as f:
+        json.dump(country_stats, f, ensure_ascii=False)
+
+    country_stats_mb = os.path.getsize(country_stats_path) / (1024 * 1024)
+    print(f"Wrote {country_stats_path} ({country_stats_mb:.1f} MB, {len(country_stats)} countries)")
 
 
 if __name__ == "__main__":

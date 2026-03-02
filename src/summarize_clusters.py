@@ -6,6 +6,9 @@ summaries at every level:
   2. A titled 10-paragraph summary for each feedback item (feedback text + attachments)
   3. Recursive bottom-up summaries for each cluster and sub-cluster
 
+Prompts are collected across all initiatives and batched together for inference,
+avoiding many tiny per-initiative batches.
+
 Output: one JSON per initiative with policy_summary, feedback_summaries, and
 cluster_summaries (at every hierarchy level).
 
@@ -15,6 +18,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -129,7 +133,6 @@ def parse_title_and_summary(text: str) -> tuple[str, str]:
 # ── Text extraction helpers ──
 
 
-
 def get_policy_text(initiative: dict) -> str:
     """Concatenate all publication document texts into a single policy text block."""
     parts = []
@@ -174,23 +177,17 @@ def get_feedback_text(feedback_item: dict) -> str:
 def build_cluster_tree(cluster_assignments: dict) -> dict:
     """Build a tree from dot-separated cluster labels.
 
-    Args:
-        cluster_assignments: dict mapping feedback_id (str) -> label (str)
-
     Returns:
         dict: label -> {"children": set of direct child labels,
                         "feedback_ids": list of feedback_ids assigned to exactly this level}
     """
     tree = {}
 
-    # Collect all labels and their direct feedback
     for feedback_id, label in cluster_assignments.items():
         if label not in tree:
             tree[label] = {"children": set(), "feedback_ids": []}
         tree[label]["feedback_ids"].append(feedback_id)
 
-    # Build parent-child relationships: walk each label up to its root,
-    # creating intermediate nodes as needed
     for label in list(tree.keys()):
         current = label
         while "." in current:
@@ -210,150 +207,11 @@ def get_depth(label: str) -> int:
     return label.count(".")
 
 
-# ── Summarization logic ──
-
-
-def summarize_single_text(text, prompt_prefix, combine_prefix, chunk_size,
-                          encoding, reasoning_effort, llm, sampling_params,
-                          batch_size, batch_dir, summary_cache, combine_max_chars,
-                          item_key, batch_num_start=0, label=""):
-    """Handle chunking + combining for one text block. Returns (title, summary) or None.
-
-    Runs Phase 1 (chunk-level) and Phase 2 (combining) for a single text item.
-    """
-    if should_skip_text(text, label=label):
-        return None
-
-    text = text.strip()
-    chunks = split_into_chunks(text, chunk_size, label=label)
-    n_chunks = len(chunks)
-
-    # Phase 1: chunk-level summaries
-    prompts = []
-    prompt_texts = []
-    prompt_map = []
-
-    for ci, chunk in enumerate(chunks):
-        prefill = build_prefill(encoding, chunk, prompt_prefix, reasoning_effort, IDENTITY_PROMPT)
-        if prefill is None:
-            print(f"  {label}item={item_key} chunk {ci+1}/{n_chunks}: SKIPPED (encoding failed)")
-            continue
-        prompts.append(prefill)
-        prompt_texts.append(chunk)
-        prompt_map.append((item_key, ci))
-
-    if not prompts:
-        return None
-
-    summarized_chunks, failed, stats = run_batch_inference(
-        llm, sampling_params, encoding,
-        prompts, prompt_texts, prompt_map,
-        batch_size, batch_dir, summary_cache,
-        batch_num_start=batch_num_start, label=label,
-    )
-    batch_num = stats["batch_num"]
-
-    # Collect chunk results
-    chunks_dict = summarized_chunks.get(item_key, {})
-
-    if n_chunks == 1:
-        result = chunks_dict.get(0)
-        if result is None:
-            return None
-        return parse_title_and_summary(result)
-
-    # Multi-chunk: need combining
-    parts = []
-    for ci in range(n_chunks):
-        if ci in chunks_dict:
-            parts.append(chunks_dict[ci])
-        else:
-            print(f"  {label}item={item_key} chunk {ci} missing, skipping")
-
-    if not parts:
-        return None
-
-    # Recursively combine
-    title, summary = combine_summaries_recursive(
-        parts, combine_prefix, combine_max_chars,
-        encoding, reasoning_effort, llm, sampling_params,
-        batch_size, batch_dir, summary_cache,
-        batch_num_start=batch_num, label=label,
-    )
-    return (title, summary)
-
-
-def combine_summaries_recursive(texts, combine_prefix, combine_max_chars,
-                                encoding, reasoning_effort, llm, sampling_params,
-                                batch_size, batch_dir, summary_cache,
-                                batch_num_start=0, label=""):
-    """Recursively group and combine texts until 1 remains. Returns (title, summary)."""
-    current = list(texts)
-    batch_num = batch_num_start
-    combine_level = 0
-
-    while len(current) > 1:
-        combine_level += 1
-        groups = group_by_char_budget(current, combine_max_chars)
-
-        prompts = []
-        prompt_texts = []
-        prompt_map = []
-        single_pass_indices = []
-
-        for gi, group in enumerate(groups):
-            if len(group) == 1:
-                single_pass_indices.append(gi)
-                continue
-            combined = "\n\n".join(group)
-            prefill = build_prefill(encoding, combined, combine_prefix, reasoning_effort, IDENTITY_PROMPT)
-            if prefill is None:
-                single_pass_indices.append(gi)
-                continue
-            prompts.append(prefill)
-            prompt_texts.append(combined)
-            prompt_map.append(("combine", gi))
-
-        results = {}
-        if prompts:
-            summarized, failed, stats = run_batch_inference(
-                llm, sampling_params, encoding,
-                prompts, prompt_texts, prompt_map,
-                batch_size, batch_dir, summary_cache,
-                batch_num_start=batch_num,
-                label=f"{label}[C{combine_level}] ",
-            )
-            batch_num = stats["batch_num"]
-            results = summarized.get("combine", {})
-
-        # Assemble next level
-        next_level = []
-        for gi, group in enumerate(groups):
-            if gi in single_pass_indices:
-                next_level.append(group[0])
-            elif gi in results:
-                next_level.append(results[gi])
-            else:
-                # Failed, keep first item as fallback
-                next_level.append(group[0])
-
-        current = next_level
-
-    return parse_title_and_summary(current[0])
-
-
-# ── Main processing ──
-
-
 def find_feedback_by_id(initiative: dict) -> dict:
-    """Build a lookup dict: feedback_id (str) -> feedback item dict.
-
-    Searches middle_feedback first (preferred), then publications.feedback.
-    """
+    """Build a lookup dict: feedback_id (str) -> feedback item dict."""
     lookup = {}
     for fb in initiative.get("middle_feedback", []):
         lookup[str(fb["id"])] = fb
-    # Also check publications.feedback as fallback
     for pub in initiative.get("publications", []):
         for fb in pub.get("feedback", []):
             fb_id = str(fb["id"])
@@ -362,382 +220,686 @@ def find_feedback_by_id(initiative: dict) -> dict:
     return lookup
 
 
-def process_initiative(initiative, llm, sampling_params, encoding, reasoning_effort,
-                       batch_size, chunk_size, combine_max_chars, output_dir, init_id):
-    """Orchestrate all 3 phases for one initiative. Writes output JSON."""
-    cluster_assignments = initiative.get("cluster_assignments", {})
-    if not cluster_assignments:
-        print(f"  No cluster_assignments, skipping")
-        return
+# ── Cluster cache helpers ──
 
-    batch_dir_p1 = os.path.join(output_dir, "_batches_p1", str(init_id))
-    batch_dir_p2 = os.path.join(output_dir, "_batches_p2", str(init_id))
-    batch_dir_p3 = os.path.join(output_dir, "_batches_p3", str(init_id))
-    os.makedirs(batch_dir_p1, exist_ok=True)
-    os.makedirs(batch_dir_p2, exist_ok=True)
-    os.makedirs(batch_dir_p3, exist_ok=True)
 
+def compute_cluster_cache_key(cluster_assignments: dict, label: str) -> str:
+    """Compute a content-addressed cache key for a cluster label.
+
+    The key is the SHA-256 of the comma-joined sorted feedback IDs that belong
+    to this label or any of its descendants (transitive).
+    """
+    prefix = label + "."
+    feedback_ids = sorted(
+        fb_id for fb_id, lbl in cluster_assignments.items()
+        if lbl == label or lbl.startswith(prefix)
+    )
+    return hashlib.sha256(",".join(feedback_ids).encode()).hexdigest()
+
+
+def load_cluster_cache(output_dir: str) -> dict:
+    """Load the cluster summary cache from disk."""
+    cache_path = os.path.join(output_dir, "_cluster_cache.json")
+    if os.path.isfile(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_cluster_cache(output_dir: str, cache: dict) -> None:
+    """Write the cluster summary cache to disk."""
+    cache_path = os.path.join(output_dir, "_cluster_cache.json")
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+
+# ── Cross-initiative batched processing ──
+
+
+def process_all_initiatives(init_data, llm, sampling_params, encoding,
+                            reasoning_effort, batch_size, chunk_size,
+                            combine_max_chars, min_noise_summarize_chars,
+                            max_prompt_tokens, output_dir,
+                            prev_summaries=None):
+    """Process all initiatives with cross-initiative batching.
+
+    Instead of processing one initiative at a time (producing many tiny batches),
+    collects prompts across all initiatives and runs large batches.
+
+    prev_summaries: optional dict of init_id -> {"policy_summary", "feedback_summaries"}
+        from a previous run.  Policy and feedback summaries are reused when the
+        source text hasn't changed, avoiding redundant LLM inference.
+    """
+    if prev_summaries is None:
+        prev_summaries = {}
     summary_cache = {}
     all_failed = []
 
-    # ── Phase 1+2: Policy summary ──
+    # Batch directory suffix from pending init IDs (for safe resume across runs)
+    run_hash = hashlib.md5(
+        ",".join(sorted(init_data.keys())).encode()
+    ).hexdigest()[:8]
 
-    print(f"\n  --- Policy summary ---")
-    policy_text = get_policy_text(initiative)
-    policy_summary = None
-    if policy_text and not should_skip_text(policy_text, label=f"init={init_id} policy"):
-        result = summarize_single_text(
-            policy_text, POLICY_SUMMARY_PREFIX, POLICY_COMBINE_PREFIX,
-            chunk_size, encoding, reasoning_effort, llm, sampling_params,
-            batch_size, batch_dir_p1, summary_cache, combine_max_chars,
-            item_key="policy", label="[POL] ",
-        )
-        if result:
-            policy_summary = {"title": result[0], "summary": result[1]}
-            print(f"  Policy summary: {result[0][:80]}")
+    batch_dir_p1 = os.path.join(output_dir, f"_batches_p1_{run_hash}")
+    batch_dir_p2 = os.path.join(output_dir, f"_batches_p2_{run_hash}")
+    batch_dir_p3 = os.path.join(output_dir, f"_batches_p3_{run_hash}")
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 1: Chunk-level summaries (policy + feedback) across all initiatives
+    # ═══════════════════════════════════════════════════════════
+
+    print(f"\n{'='*60}")
+    print(f"Phase 1: Chunk-level summaries across {len(init_data)} initiatives")
+    print(f"{'='*60}")
+
+    p1_prompts = []
+    p1_texts = []
+    p1_map = []
+
+    policy_chunk_counts = {}  # init_id -> n_chunks
+    fb_chunk_counts = {}  # (init_id, feedback_id) -> n_chunks
+    fb_dedup_maps = {}  # init_id -> {dup_id: canonical_id}
+    fb_dedup_total = 0
+    fb_noise_raw_total = 0
+    noise_raw_summaries = {}  # init_id -> {feedback_id -> {"title", "summary"}}
+    cluster_assignments_all = {}  # init_id -> cluster_assignments
+    reused_policy = {}  # init_id -> {"title", "summary"} from prev
+    reused_feedback = {}  # init_id -> {feedback_id -> {"title", "summary"}} from prev
+    reused_policy_count = 0
+    reused_feedback_count = 0
+    reused_from_details_count = 0
+
+    # Pre-compute noise feedback IDs so Phase 1 can skip short ones
+    noise_ids_all = {}  # init_id -> set of feedback_ids with label "-1"
+    for init_id in sorted(init_data.keys()):
+        ca = init_data[init_id].get("cluster_assignments", {})
+        noise = {fb_id for fb_id, label in ca.items() if label == "-1"}
+        if noise:
+            noise_ids_all[init_id] = noise
+
+    for init_id in sorted(init_data.keys()):
+        initiative = init_data[init_id]
+        cluster_assignments = initiative.get("cluster_assignments", {})
+        cluster_assignments_all[init_id] = cluster_assignments
+
+        # Policy prompts — reuse from previous run if available
+        prev = prev_summaries.get(init_id, {})
+        prev_ps = prev.get("policy_summary")
+        if prev_ps and prev_ps.get("summary"):
+            reused_policy[init_id] = prev_ps
+            reused_policy_count += 1
         else:
-            print(f"  Policy summary: FAILED")
-    else:
-        print(f"  No policy text to summarize")
+            policy_text = get_policy_text(initiative)
+            if policy_text and not should_skip_text(policy_text, label=f"init={init_id} policy"):
+                chunks = split_into_chunks(policy_text, chunk_size,
+                                           label=f"init={init_id} policy")
+                policy_chunk_counts[init_id] = len(chunks)
+                for ci, chunk in enumerate(chunks):
+                    prefill = build_prefill(encoding, chunk, POLICY_SUMMARY_PREFIX,
+                                            reasoning_effort, IDENTITY_PROMPT,
+                                            max_prompt_tokens)
+                    if prefill:
+                        p1_prompts.append(prefill)
+                        p1_texts.append(chunk)
+                        p1_map.append((f"pol:{init_id}", ci))
 
-    # ── Phase 1+2: Feedback summaries ──
+        # Feedback prompts (with per-initiative dedup)
+        prev_fb = prev.get("feedback_summaries", {})
+        fb_lookup = find_feedback_by_id(initiative)
+        fb_text_to_canonical = {}
+        fb_dedup_map = {}
 
-    print(f"\n  --- Feedback summaries ({len(cluster_assignments)} items) ---")
-    fb_lookup = find_feedback_by_id(initiative)
-    feedback_summaries = {}  # feedback_id -> {"title": ..., "summary": ...}
-
-    # Collect all feedback texts, deduplicate, and build chunk-level prompts
-    fb_prompts = []
-    fb_prompt_texts = []
-    fb_prompt_map = []  # (feedback_id, chunk_index)
-    fb_chunk_counts = {}  # feedback_id -> n_chunks
-    fb_text_to_canonical = {}  # text -> first feedback_id that uses it
-    fb_dedup_map = {}  # feedback_id -> canonical feedback_id (for duplicates)
-    fb_dedup_count = 0
-
-    for feedback_id in cluster_assignments:
-        fb = fb_lookup.get(feedback_id)
-        if fb is None:
-            print(f"  WARNING: feedback {feedback_id} not found in initiative data")
-            continue
-
-        text = get_feedback_text(fb)
-        label = f"init={init_id} fb={feedback_id}"
-        if should_skip_text(text, label=label):
-            continue
-
-        text = text.strip()
-
-        # Deduplicate: if we've seen this exact text before, map to the canonical ID
-        if text in fb_text_to_canonical:
-            canonical_id = fb_text_to_canonical[text]
-            fb_dedup_map[feedback_id] = canonical_id
-            fb_dedup_count += 1
-            continue
-        fb_text_to_canonical[text] = feedback_id
-
-        chunks = split_into_chunks(text, chunk_size, label=label)
-        fb_chunk_counts[feedback_id] = len(chunks)
-
-        for ci, chunk in enumerate(chunks):
-            prefill = build_prefill(encoding, chunk, FEEDBACK_SUMMARY_PREFIX, reasoning_effort, IDENTITY_PROMPT)
-            if prefill is None:
-                print(f"  fb={feedback_id} chunk {ci+1}/{len(chunks)}: SKIPPED (encoding failed)")
+        for feedback_id in sorted(cluster_assignments.keys()):
+            # Reuse previous feedback summary if available
+            prev_fs = prev_fb.get(feedback_id) or prev_fb.get(str(feedback_id))
+            if prev_fs and prev_fs.get("summary"):
+                reused_feedback.setdefault(init_id, {})[feedback_id] = prev_fs
+                reused_feedback_count += 1
                 continue
-            fb_prompts.append(prefill)
-            fb_prompt_texts.append(chunk)
-            fb_prompt_map.append((feedback_id, ci))
 
-    if fb_dedup_count:
-        print(f"  Deduplicated {fb_dedup_count} feedback items with identical text")
+            # Reuse cluster_feedback_summary from initiative_details (durable)
+            fb = fb_lookup.get(feedback_id)
+            if fb is not None:
+                cfs = fb.get("cluster_feedback_summary")
+                if cfs and cfs.get("summary"):
+                    reused_feedback.setdefault(init_id, {})[feedback_id] = {
+                        "title": cfs.get("title", ""),
+                        "summary": cfs["summary"],
+                    }
+                    reused_from_details_count += 1
+                    continue
 
-    if fb_prompts:
-        print(f"  Phase 1: {len(fb_prompts)} chunk prompts for {len(fb_chunk_counts)} feedback items")
+            if fb is None:
+                continue
+            text = get_feedback_text(fb)
+            label = f"init={init_id} fb={feedback_id}"
+            if should_skip_text(text, label=label):
+                continue
+            text = text.strip()
 
-        fb_batch_dir = os.path.join(batch_dir_p1, "feedback")
-        os.makedirs(fb_batch_dir, exist_ok=True)
+            # Short noise items: use raw text directly instead of LLM summary
+            is_noise = feedback_id in noise_ids_all.get(init_id, set())
+            if is_noise and min_noise_summarize_chars and len(text) < min_noise_summarize_chars:
+                first_line = text.split("\n", 1)[0][:120].strip()
+                noise_raw_summaries.setdefault(init_id, {})[feedback_id] = {
+                    "title": first_line,
+                    "summary": text,
+                }
+                fb_noise_raw_total += 1
+                continue
 
-        fb_summarized, fb_failed, fb_stats = run_batch_inference(
+            # Deduplicate identical texts within this initiative
+            if text in fb_text_to_canonical:
+                fb_dedup_map[feedback_id] = fb_text_to_canonical[text]
+                fb_dedup_total += 1
+                continue
+            fb_text_to_canonical[text] = feedback_id
+
+            chunks = split_into_chunks(text, chunk_size, label=label)
+            fb_chunk_counts[(init_id, feedback_id)] = len(chunks)
+
+            for ci, chunk in enumerate(chunks):
+                prefill = build_prefill(encoding, chunk, FEEDBACK_SUMMARY_PREFIX,
+                                        reasoning_effort, IDENTITY_PROMPT,
+                                        max_prompt_tokens)
+                if prefill:
+                    p1_prompts.append(prefill)
+                    p1_texts.append(chunk)
+                    p1_map.append((f"fb:{init_id}:{feedback_id}", ci))
+
+        fb_dedup_maps[init_id] = fb_dedup_map
+
+    n_policy = len(policy_chunk_counts)
+    n_feedback = len(fb_chunk_counts)
+    print(f"Collected {len(p1_prompts)} prompts "
+          f"({n_policy} policy items, {n_feedback} unique feedback items)")
+    if reused_policy_count or reused_feedback_count or reused_from_details_count:
+        print(f"  ({reused_policy_count} policy + {reused_feedback_count} feedback "
+              f"summaries reused from previous run"
+              f"{f', {reused_from_details_count} from initiative_details' if reused_from_details_count else ''}"
+              f")")
+    if fb_noise_raw_total:
+        print(f"  ({fb_noise_raw_total} short noise items using raw text, "
+              f"skipped LLM summarization)")
+    if fb_dedup_total:
+        print(f"  ({fb_dedup_total} feedback items deduplicated within initiatives)")
+
+    # Run Phase 1 inference
+    os.makedirs(batch_dir_p1, exist_ok=True)
+    p1_results = {}
+    if p1_prompts:
+        p1_results, p1_failed, _ = run_batch_inference(
             llm, sampling_params, encoding,
-            fb_prompts, fb_prompt_texts, fb_prompt_map,
-            batch_size, fb_batch_dir, summary_cache,
-            label="[FB-P1] ",
+            p1_prompts, p1_texts, p1_map,
+            batch_size, batch_dir_p1, summary_cache,
+            label="[P1] ",
         )
-        all_failed.extend(fb_failed)
+        all_failed.extend(p1_failed)
 
-        # Assemble single-chunk results and collect multi-chunk items
-        fb_multi_chunk = {}  # feedback_id -> [chunk summaries in order]
+    # Extract policy results
+    policy_summaries = {}  # init_id -> {"title", "summary"}
+    policy_multi_chunk = {}  # init_id -> [parts]
 
-        for feedback_id, n_chunks in fb_chunk_counts.items():
-            chunks_dict = fb_summarized.get(feedback_id, {})
+    for init_id, n_chunks in policy_chunk_counts.items():
+        key = f"pol:{init_id}"
+        chunks_dict = p1_results.get(key, {})
+        if n_chunks == 1:
+            if 0 in chunks_dict:
+                t, s = parse_title_and_summary(chunks_dict[0])
+                policy_summaries[init_id] = {"title": t, "summary": s}
+        else:
+            parts = [chunks_dict[ci] for ci in range(n_chunks) if ci in chunks_dict]
+            if parts:
+                policy_multi_chunk[init_id] = parts
 
-            if n_chunks == 1:
-                if 0 in chunks_dict:
-                    feedback_summaries[feedback_id] = dict(
-                        zip(("title", "summary"), parse_title_and_summary(chunks_dict[0]))
-                    )
-            else:
-                parts = []
-                for ci in range(n_chunks):
-                    if ci in chunks_dict:
-                        parts.append(chunks_dict[ci])
-                if parts:
-                    fb_multi_chunk[feedback_id] = parts
+    # Extract feedback results
+    feedback_summaries = {}  # init_id -> {feedback_id -> {"title", "summary"}}
+    fb_multi_chunk = {}  # (init_id, feedback_id) -> [parts]
 
-        # Phase 2: combine multi-chunk feedback summaries
-        if fb_multi_chunk:
-            print(f"\n  Phase 2: combining {len(fb_multi_chunk)} multi-chunk feedback items")
+    for (init_id, feedback_id), n_chunks in fb_chunk_counts.items():
+        key = f"fb:{init_id}:{feedback_id}"
+        chunks_dict = p1_results.get(key, {})
+        if n_chunks == 1:
+            if 0 in chunks_dict:
+                t, s = parse_title_and_summary(chunks_dict[0])
+                feedback_summaries.setdefault(init_id, {})[feedback_id] = {
+                    "title": t, "summary": s,
+                }
+        else:
+            parts = [chunks_dict[ci] for ci in range(n_chunks) if ci in chunks_dict]
+            if parts:
+                fb_multi_chunk[(init_id, feedback_id)] = parts
+
+    # Merge raw noise summaries into feedback_summaries
+    for init_id, fb_map in noise_raw_summaries.items():
+        feedback_summaries.setdefault(init_id, {}).update(fb_map)
+
+    # Merge reused summaries from previous run
+    policy_summaries.update(reused_policy)
+    for init_id, fb_map in reused_feedback.items():
+        feedback_summaries.setdefault(init_id, {}).update(fb_map)
+
+    fb_done = sum(len(v) for v in feedback_summaries.values())
+    print(f"\nPhase 1 results:")
+    print(f"  Policy: {len(policy_summaries)} done, {len(policy_multi_chunk)} multi-chunk")
+    print(f"  Feedback: {fb_done} done ({fb_noise_raw_total} raw noise), "
+          f"{len(fb_multi_chunk)} multi-chunk")
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 2: Combine multi-chunk summaries (policy + feedback)
+    # ═══════════════════════════════════════════════════════════
+
+    if policy_multi_chunk or fb_multi_chunk:
+        print(f"\n{'='*60}")
+        print(f"Phase 2: Combining multi-chunk summaries")
+        print(f"{'='*60}")
+
+        os.makedirs(batch_dir_p2, exist_ok=True)
+        batch_num_p2 = 0
+
+        # current_parts: key -> (parts_list, combine_prefix)
+        current_parts = {}
+        for init_id, parts in sorted(policy_multi_chunk.items()):
+            current_parts[f"pol:{init_id}"] = (parts, POLICY_COMBINE_PREFIX)
+        for (init_id, feedback_id), parts in sorted(fb_multi_chunk.items()):
+            current_parts[f"fb:{init_id}:{feedback_id}"] = (parts, FEEDBACK_COMBINE_PREFIX)
+
+        combine_round = 0
+        while current_parts:
+            combine_round += 1
+            print(f"\n  Combine round {combine_round}: {len(current_parts)} items")
 
             p2_prompts = []
             p2_texts = []
             p2_map = []
-            p2_chunk_groups = {}  # feedback_id -> list of groups
-            batch_num_p2 = 0
+            key_groups = {}
 
-            current_parts = dict(fb_multi_chunk)
-
-            while current_parts:
-                p2_prompts = []
-                p2_texts = []
-                p2_map = []
-
-                for feedback_id, parts in current_parts.items():
-                    groups = group_by_char_budget(parts, combine_max_chars)
-                    p2_chunk_groups[feedback_id] = groups
-                    for gi, group in enumerate(groups):
-                        if len(group) == 1:
-                            continue
-                        combined = "\n\n".join(group)
-                        prefill = build_prefill(encoding, combined, FEEDBACK_COMBINE_PREFIX, reasoning_effort, IDENTITY_PROMPT)
-                        if prefill is None:
-                            continue
+            for key in sorted(current_parts.keys()):
+                parts, prefix = current_parts[key]
+                groups = group_by_char_budget(parts, combine_max_chars)
+                key_groups[key] = groups
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        continue
+                    combined = "\n\n".join(group)
+                    prefill = build_prefill(encoding, combined, prefix,
+                                            reasoning_effort, IDENTITY_PROMPT,
+                                            max_prompt_tokens)
+                    if prefill:
                         p2_prompts.append(prefill)
                         p2_texts.append(combined)
-                        p2_map.append((feedback_id, gi))
+                        p2_map.append((key, gi))
 
-                if p2_prompts:
-                    fb_p2_dir = os.path.join(batch_dir_p2, "feedback")
-                    os.makedirs(fb_p2_dir, exist_ok=True)
+            p2_results = {}
+            if p2_prompts:
+                p2_summarized, p2_failed, p2_stats = run_batch_inference(
+                    llm, sampling_params, encoding,
+                    p2_prompts, p2_texts, p2_map,
+                    batch_size, batch_dir_p2, summary_cache,
+                    batch_num_start=batch_num_p2,
+                    label=f"[P2-R{combine_round}] ",
+                )
+                batch_num_p2 = p2_stats["batch_num"]
+                all_failed.extend(p2_failed)
+                p2_results = p2_summarized
 
-                    p2_results, p2_failed, p2_stats = run_batch_inference(
-                        llm, sampling_params, encoding,
-                        p2_prompts, p2_texts, p2_map,
-                        batch_size, fb_p2_dir, summary_cache,
-                        batch_num_start=batch_num_p2, label="[FB-C] ",
-                    )
-                    batch_num_p2 = p2_stats["batch_num"]
-                    all_failed.extend(p2_failed)
+            next_parts = {}
+            for key, (parts, prefix) in current_parts.items():
+                groups = key_groups[key]
+                new_parts = []
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        new_parts.append(group[0])
+                    else:
+                        result = p2_results.get(key, {}).get(gi)
+                        new_parts.append(result if result else group[0])
+
+                if len(new_parts) == 1:
+                    t, s = parse_title_and_summary(new_parts[0])
+                    if key.startswith("pol:"):
+                        init_id = key.split(":", 1)[1]
+                        policy_summaries[init_id] = {"title": t, "summary": s}
+                    elif key.startswith("fb:"):
+                        _, init_id, feedback_id = key.split(":", 2)
+                        feedback_summaries.setdefault(init_id, {})[feedback_id] = {
+                            "title": t, "summary": s,
+                        }
                 else:
-                    p2_results = {}
+                    next_parts[key] = (new_parts, prefix)
 
-                # Collect into next level
-                next_parts = {}
-                for feedback_id, parts in current_parts.items():
-                    groups = p2_chunk_groups[feedback_id]
-                    new_parts = []
-                    for gi, group in enumerate(groups):
-                        if len(group) == 1:
-                            new_parts.append(group[0])
-                        else:
-                            result = p2_results.get(feedback_id, {}).get(gi)
-                            if result:
-                                new_parts.append(result)
-                            else:
-                                new_parts.append(group[0])  # fallback
-
-                    if len(new_parts) == 1:
-                        feedback_summaries[feedback_id] = dict(
-                            zip(("title", "summary"), parse_title_and_summary(new_parts[0]))
-                        )
-                    elif len(new_parts) > 1:
-                        next_parts[feedback_id] = new_parts
-
-                current_parts = next_parts
-                p2_chunk_groups = {}
+            current_parts = next_parts
 
     # Copy summaries to deduplicated feedback IDs
-    for dup_id, canonical_id in fb_dedup_map.items():
-        if canonical_id in feedback_summaries:
-            feedback_summaries[dup_id] = feedback_summaries[canonical_id]
+    for init_id, fb_dedup_map in fb_dedup_maps.items():
+        init_fb = feedback_summaries.get(init_id, {})
+        for dup_id, canonical_id in fb_dedup_map.items():
+            if canonical_id in init_fb:
+                init_fb[dup_id] = init_fb[canonical_id]
 
-    print(f"  Feedback summaries: {len(feedback_summaries)}/{len(cluster_assignments)}"
-          f"{f' ({fb_dedup_count} deduplicated)' if fb_dedup_count else ''}")
+    total_fb = sum(len(v) for v in feedback_summaries.values())
+    total_ca = sum(len(ca) for ca in cluster_assignments_all.values())
+    print(f"\nFeedback summaries: {total_fb}/{total_ca}"
+          f"{f' ({fb_dedup_total} deduplicated)' if fb_dedup_total else ''}")
+    print(f"Policy summaries: {len(policy_summaries)}/{len(init_data)}")
 
-    # ── Phase 3: Bottom-up cluster summaries ──
+    # ═══════════════════════════════════════════════════════════
+    # Phase 3: Bottom-up cluster summaries across all initiatives
+    # ═══════════════════════════════════════════════════════════
 
-    print(f"\n  --- Cluster summaries ---")
-    tree = build_cluster_tree(cluster_assignments)
+    print(f"\n{'='*60}")
+    print(f"Phase 3: Bottom-up cluster summaries across all initiatives")
+    print(f"{'='*60}")
 
-    # Determine processing order: deepest labels first
-    all_labels = list(tree.keys())
-    max_depth_val = max(get_depth(label) for label in all_labels) if all_labels else 0
-    labels_by_depth = {}
-    for label in all_labels:
-        d = get_depth(label)
-        labels_by_depth.setdefault(d, []).append(label)
+    cluster_trees = {}
+    max_depth_global = 0
+    for init_id, ca in cluster_assignments_all.items():
+        if not ca:
+            continue
+        tree = build_cluster_tree(ca)
+        cluster_trees[init_id] = tree
+        if tree:
+            md = max(get_depth(label) for label in tree.keys())
+            max_depth_global = max(max_depth_global, md)
 
-    print(f"  Cluster tree: {len(all_labels)} labels, max depth {max_depth_val}")
-    for d in sorted(labels_by_depth.keys()):
-        print(f"    depth {d}: {len(labels_by_depth[d])} labels")
+    total_labels = sum(len(t) for t in cluster_trees.values())
+    print(f"Cluster trees: {len(cluster_trees)} initiatives, "
+          f"{total_labels} labels, max depth {max_depth_global}")
 
-    cluster_summaries = {}  # label -> {"title": ..., "summary": ..., "feedback_count": ...}
+    cluster_summaries = {}  # init_id -> {label -> {"title", "summary", "feedback_count"}}
+
+    # Load content-addressed cluster cache
+    cluster_cache = load_cluster_cache(output_dir)
+    n_cache_hit = 0
+
+    # Noise handling: each "-1" feedback item becomes its own cluster summary
+    # (no combining — noise items are unrelated by definition)
+    n_noise_total = 0
+    for init_id, tree in cluster_trees.items():
+        if "-1" not in tree:
+            continue
+        node = tree["-1"]
+        init_fb = feedback_summaries.get(init_id, {})
+        for fb_id in node["feedback_ids"]:
+            if fb_id in init_fb:
+                fs = init_fb[fb_id]
+                cluster_summaries.setdefault(init_id, {})[f"-1:{fb_id}"] = {
+                    "title": fs["title"],
+                    "summary": fs["summary"],
+                    "feedback_count": 1,
+                }
+            n_noise_total += 1
+        del tree["-1"]
+
+    if n_noise_total:
+        print(f"Noise: {n_noise_total} feedback items promoted to "
+              f"individual cluster summaries (no combining)")
+
     batch_num_p3 = 0
 
-    # Process bottom-up
-    for depth in range(max_depth_val, -1, -1):
-        labels_at_depth = labels_by_depth.get(depth, [])
+    for depth in range(max_depth_global, -1, -1):
+        # Collect all labels at this depth across all initiatives
+        labels_at_depth = {}  # init_id -> [labels]
+        n_labels = 0
+        for init_id, tree in cluster_trees.items():
+            labels = [label for label in tree if get_depth(label) == depth]
+            if labels:
+                labels_at_depth[init_id] = labels
+                n_labels += len(labels)
+
         if not labels_at_depth:
             continue
 
-        print(f"\n  Processing depth {depth}: {len(labels_at_depth)} labels")
+        print(f"\n  Depth {depth}: {n_labels} labels across "
+              f"{len(labels_at_depth)} initiatives")
 
-        # Collect all combine prompts for this depth level
+        # Build combine prompts for this depth
         p3_prompts = []
         p3_texts = []
-        p3_map = []  # (label, group_index)
-        label_groups = {}  # label -> list of text groups
-        label_texts = {}  # label -> list of all texts to combine
-        label_fb_counts = {}  # label -> total feedback count
+        p3_map = []
+        label_groups = {}  # (init_id, label) -> groups
+        label_fb_counts = {}  # (init_id, label) -> fb_count
+        n_single = 0
 
-        for label in labels_at_depth:
-            node = tree[label]
-            texts_to_combine = []
+        for init_id in sorted(labels_at_depth.keys()):
+            labels = labels_at_depth[init_id]
+            tree = cluster_trees[init_id]
+            init_fb = feedback_summaries.get(init_id, {})
+            init_cs = cluster_summaries.get(init_id, {})
 
-            # Direct feedback summaries
-            fb_count = 0
-            for fb_id in node["feedback_ids"]:
-                fb_count += 1
-                if fb_id in feedback_summaries:
-                    fs = feedback_summaries[fb_id]
-                    texts_to_combine.append(fs["title"] + "\n\n" + fs["summary"])
+            for label in sorted(labels):
+                node = tree[label]
+                texts_to_combine = []
+                fb_count = 0
 
-            # Child cluster summaries
-            for child_label in sorted(node["children"]):
-                if child_label in cluster_summaries:
-                    cs = cluster_summaries[child_label]
-                    fb_count += cs["feedback_count"]
-                    texts_to_combine.append(cs["title"] + "\n\n" + cs["summary"])
+                for fb_id in node["feedback_ids"]:
+                    fb_count += 1
+                    if fb_id in init_fb:
+                        fs = init_fb[fb_id]
+                        texts_to_combine.append(
+                            fs["title"] + "\n\n" + fs["summary"])
 
-            label_fb_counts[label] = fb_count
+                for child_label in sorted(node["children"]):
+                    if child_label in init_cs:
+                        cs = init_cs[child_label]
+                        fb_count += cs["feedback_count"]
+                        texts_to_combine.append(
+                            cs["title"] + "\n\n" + cs["summary"])
 
-            if not texts_to_combine:
-                print(f"    label={label}: no texts to combine (0 feedback)")
-                continue
+                label_fb_counts[(init_id, label)] = fb_count
 
-            if len(texts_to_combine) == 1:
-                # Single item: use directly
-                title, summary = parse_title_and_summary(texts_to_combine[0])
-                cluster_summaries[label] = {
-                    "title": title,
-                    "summary": summary,
-                    "feedback_count": fb_count,
-                }
-                print(f"    label={label}: single item, used directly ({fb_count} feedback)")
-                continue
-
-            label_texts[label] = texts_to_combine
-            # Group for combining
-            groups = group_by_char_budget(texts_to_combine, combine_max_chars)
-            label_groups[label] = groups
-
-            for gi, group in enumerate(groups):
-                if len(group) == 1:
+                if not texts_to_combine:
                     continue
-                combined = "\n\n".join(group)
-                prefill = build_prefill(encoding, combined, CLUSTER_COMBINE_PREFIX, reasoning_effort, IDENTITY_PROMPT)
-                if prefill is None:
+
+                # Check content-addressed cache
+                ca = cluster_assignments_all[init_id]
+                cache_key = compute_cluster_cache_key(ca, label)
+                cached = cluster_cache.get(cache_key)
+                if cached and cached.get("summary"):
+                    cluster_summaries.setdefault(init_id, {})[label] = {
+                        "title": cached["title"],
+                        "summary": cached["summary"],
+                        "feedback_count": fb_count,
+                    }
+                    n_cache_hit += 1
                     continue
-                p3_prompts.append(prefill)
-                p3_texts.append(combined)
-                p3_map.append((label, gi))
+
+                if len(texts_to_combine) == 1:
+                    t, s = parse_title_and_summary(texts_to_combine[0])
+                    cluster_summaries.setdefault(init_id, {})[label] = {
+                        "title": t, "summary": s, "feedback_count": fb_count,
+                    }
+                    n_single += 1
+                    continue
+
+                groups = group_by_char_budget(texts_to_combine, combine_max_chars)
+                label_groups[(init_id, label)] = groups
+
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        continue
+                    combined = "\n\n".join(group)
+                    prefill = build_prefill(encoding, combined,
+                                            CLUSTER_COMBINE_PREFIX,
+                                            reasoning_effort, IDENTITY_PROMPT,
+                                            max_prompt_tokens)
+                    if prefill:
+                        p3_prompts.append(prefill)
+                        p3_texts.append(combined)
+                        p3_map.append((f"cl:{init_id}:{label}", gi))
+
+        if n_single:
+            print(f"    {n_single} single-item labels used directly")
 
         if not p3_prompts and not label_groups:
             continue
 
-        # Run inference if needed
+        # Run inference for this depth
         p3_results = {}
         if p3_prompts:
-            p3_batch_dir = os.path.join(batch_dir_p3, f"depth_{depth}")
-            os.makedirs(p3_batch_dir, exist_ok=True)
+            p3_dir = os.path.join(batch_dir_p3, f"depth_{depth}")
+            os.makedirs(p3_dir, exist_ok=True)
 
             p3_summarized, p3_failed, p3_stats = run_batch_inference(
                 llm, sampling_params, encoding,
                 p3_prompts, p3_texts, p3_map,
-                batch_size, p3_batch_dir, summary_cache,
+                batch_size, p3_dir, summary_cache,
                 batch_num_start=batch_num_p3,
-                label=f"[CL-D{depth}] ",
+                label=f"[P3-D{depth}] ",
             )
             batch_num_p3 = p3_stats["batch_num"]
             all_failed.extend(p3_failed)
             p3_results = p3_summarized
 
-        # Assemble results and recursively combine if needed
-        pending_labels = {}
-        for label, groups in label_groups.items():
+        # Assemble first-round results
+        pending_combine = {}  # (init_id, label) -> [parts]
+
+        for (init_id, label), groups in label_groups.items():
+            key = f"cl:{init_id}:{label}"
             new_parts = []
             for gi, group in enumerate(groups):
                 if len(group) == 1:
                     new_parts.append(group[0])
                 else:
-                    result = p3_results.get(label, {}).get(gi)
-                    if result:
-                        new_parts.append(result)
-                    else:
-                        new_parts.append(group[0])  # fallback
+                    result = p3_results.get(key, {}).get(gi)
+                    new_parts.append(result if result else group[0])
 
             if len(new_parts) == 1:
-                title, summary = parse_title_and_summary(new_parts[0])
-                cluster_summaries[label] = {
-                    "title": title,
-                    "summary": summary,
-                    "feedback_count": label_fb_counts[label],
+                t, s = parse_title_and_summary(new_parts[0])
+                cluster_summaries.setdefault(init_id, {})[label] = {
+                    "title": t, "summary": s,
+                    "feedback_count": label_fb_counts[(init_id, label)],
                 }
-                print(f"    label={label}: combined ({label_fb_counts[label]} feedback)")
             else:
-                pending_labels[label] = new_parts
+                pending_combine[(init_id, label)] = new_parts
 
-        # Handle labels that still need more combining rounds
-        for label, parts in pending_labels.items():
-            p3_extra_dir = os.path.join(batch_dir_p3, f"depth_{depth}_extra_{label}")
-            os.makedirs(p3_extra_dir, exist_ok=True)
+        # Extra combining rounds for labels that still have multiple parts
+        combine_round = 0
+        while pending_combine:
+            combine_round += 1
+            print(f"    Extra combine round {combine_round}: "
+                  f"{len(pending_combine)} labels")
 
-            title, summary = combine_summaries_recursive(
-                parts, CLUSTER_COMBINE_PREFIX, combine_max_chars,
-                encoding, reasoning_effort, llm, sampling_params,
-                batch_size, p3_extra_dir, summary_cache,
-                label=f"[CL-{label}] ",
-            )
-            cluster_summaries[label] = {
-                "title": title,
-                "summary": summary,
-                "feedback_count": label_fb_counts[label],
-            }
-            print(f"    label={label}: combined recursively ({label_fb_counts[label]} feedback)")
+            ex_prompts = []
+            ex_texts = []
+            ex_map = []
+            ex_groups = {}
 
-    print(f"\n  Cluster summaries: {len(cluster_summaries)} labels")
+            for (init_id, label) in sorted(pending_combine.keys()):
+                parts = pending_combine[(init_id, label)]
+                groups = group_by_char_budget(parts, combine_max_chars)
+                ex_groups[(init_id, label)] = groups
 
-    # ── Write output ──
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        continue
+                    combined = "\n\n".join(group)
+                    prefill = build_prefill(encoding, combined,
+                                            CLUSTER_COMBINE_PREFIX,
+                                            reasoning_effort, IDENTITY_PROMPT,
+                                            max_prompt_tokens)
+                    if prefill:
+                        ex_prompts.append(prefill)
+                        ex_texts.append(combined)
+                        ex_map.append((f"cl:{init_id}:{label}", gi))
 
-    output = {
-        "initiative_id": initiative.get("id"),
-        "short_title": initiative.get("short_title", ""),
-        "policy_summary": policy_summary,
-        "feedback_summaries": feedback_summaries,
-        "cluster_summaries": {
-            label: cs for label, cs in sorted(cluster_summaries.items())
-        },
-    }
+            ex_results = {}
+            if ex_prompts:
+                ex_dir = os.path.join(batch_dir_p3,
+                                      f"depth_{depth}_x{combine_round}")
+                os.makedirs(ex_dir, exist_ok=True)
 
-    out_path = os.path.join(output_dir, f"{init_id}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"\n  Wrote {out_path}")
+                ex_summarized, ex_failed, ex_stats = run_batch_inference(
+                    llm, sampling_params, encoding,
+                    ex_prompts, ex_texts, ex_map,
+                    batch_size, ex_dir, summary_cache,
+                    batch_num_start=batch_num_p3,
+                    label=f"[P3-D{depth}-X{combine_round}] ",
+                )
+                batch_num_p3 = ex_stats["batch_num"]
+                all_failed.extend(ex_failed)
+                ex_results = ex_summarized
+
+            next_pending = {}
+            for (init_id, label), parts in pending_combine.items():
+                key = f"cl:{init_id}:{label}"
+                groups = ex_groups[(init_id, label)]
+                new_parts = []
+                for gi, group in enumerate(groups):
+                    if len(group) == 1:
+                        new_parts.append(group[0])
+                    else:
+                        result = ex_results.get(key, {}).get(gi)
+                        new_parts.append(result if result else group[0])
+
+                if len(new_parts) == 1:
+                    t, s = parse_title_and_summary(new_parts[0])
+                    cluster_summaries.setdefault(init_id, {})[label] = {
+                        "title": t, "summary": s,
+                        "feedback_count": label_fb_counts[(init_id, label)],
+                    }
+                else:
+                    next_pending[(init_id, label)] = new_parts
+
+            pending_combine = next_pending
+
+    total_cs = sum(len(v) for v in cluster_summaries.values())
+    print(f"\nCluster summaries: {total_cs} labels across "
+          f"{len(cluster_summaries)} initiatives"
+          f"{f' ({n_cache_hit} from cache)' if n_cache_hit else ''}")
+
+    # Update cluster cache with new entries (non-noise labels only)
+    n_new_cache = 0
+    for init_id, cs_map in cluster_summaries.items():
+        ca = cluster_assignments_all.get(init_id, {})
+        for label, cs in cs_map.items():
+            if label.startswith("-1:"):
+                continue
+            cache_key = compute_cluster_cache_key(ca, label)
+            if cache_key not in cluster_cache:
+                cluster_cache[cache_key] = {
+                    "title": cs["title"],
+                    "summary": cs["summary"],
+                }
+                n_new_cache += 1
+    if cluster_cache:
+        save_cluster_cache(output_dir, cluster_cache)
+        print(f"Cluster cache: {len(cluster_cache)} entries "
+              f"({n_new_cache} new, {n_cache_hit} hits)")
+
+    # ═══════════════════════════════════════════════════════════
+    # Write output files
+    # ═══════════════════════════════════════════════════════════
+
+    print(f"\n{'='*60}")
+    print(f"Writing output files")
+    print(f"{'='*60}")
+
+    for init_id in sorted(init_data.keys()):
+        initiative = init_data[init_id]
+        init_fb = feedback_summaries.get(init_id, {})
+        init_cs = cluster_summaries.get(init_id, {})
+
+        output = {
+            "initiative_id": initiative.get("id"),
+            "short_title": initiative.get("short_title", ""),
+            "policy_summary": policy_summaries.get(init_id),
+            "feedback_summaries": init_fb,
+            "cluster_summaries": {
+                label: cs for label, cs in sorted(init_cs.items())
+            },
+        }
+
+        out_path = os.path.join(output_dir, f"{init_id}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=2)
+
+    print(f"Wrote {len(init_data)} output files to {output_dir}/")
 
     if all_failed:
-        failed_path = os.path.join(output_dir, f"_failed_{init_id}.json")
+        failed_path = os.path.join(output_dir, "_all_failed.json")
         with open(failed_path, "w", encoding="utf-8") as f:
             json.dump(all_failed, f, ensure_ascii=False, indent=2)
-        print(f"  FAILED: {len(all_failed)} prompts. Wrote {failed_path}")
+        print(f"FAILED: {len(all_failed)} prompts. Wrote {failed_path}")
 
 
 def main():
@@ -746,7 +908,8 @@ def main():
     )
     parser.add_argument(
         "input_dir",
-        help="Directory of clustering output JSON files (from cluster_all_initiatives.py)",
+        help="Directory of clustering output JSON files "
+             "(from cluster_all_initiatives.py)",
     )
     parser.add_argument(
         "-o", "--output", required=True,
@@ -782,18 +945,30 @@ def main():
     )
     parser.add_argument(
         "--combine-budget", type=int, default=COMBINE_BUDGET,
-        help=f"Max chars when combining summaries per inference call (default: {COMBINE_BUDGET}).",
+        help=f"Max chars when combining summaries per inference call "
+             f"(default: {COMBINE_BUDGET}).",
+    )
+    parser.add_argument(
+        "--min-noise-summarize-chars", type=int, default=1000,
+        help="Noise feedback shorter than this uses raw text instead of "
+             "LLM summary (default: 1000, 0=summarize all).",
+    )
+    parser.add_argument(
+        "--prev-output", type=str, default=None,
+        help="Previous output directory to reuse policy/feedback summaries from. "
+             "Summaries for items with unchanged source text are carried forward, "
+             "skipping LLM inference for those items.",
     )
     args = parser.parse_args()
 
-    # Load whitelist if specified
+    # Load whitelist
     whitelist = None
     if args.filter:
         with open(args.filter, encoding="utf-8") as f:
             whitelist = set(line.strip() for line in f if line.strip())
         print(f"Whitelist: {len(whitelist)} initiative IDs from {args.filter}")
 
-    # Initialize openai_harmony encoding
+    # Initialize encoding
     encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
     reasoning_effort = ReasoningEffort.MEDIUM
 
@@ -804,14 +979,11 @@ def main():
     )
     print(f"Found {len(input_files)} JSON files in {args.input_dir}/")
 
-    # Extract initiative ID from filename (first numeric segment or whole stem)
     def extract_init_id(filename):
         stem = filename.replace(".json", "")
-        # Filenames may be plain "12096.json" or "12096_agglomerative_...json"
-        parts = stem.split("_")
-        return parts[0]
+        return stem.split("_")[0]
 
-    # Filter by whitelist and deduplicate (take first file per initiative)
+    # Filter and deduplicate
     seen_ids = set()
     selected_files = []
     for f in input_files:
@@ -829,7 +1001,7 @@ def main():
         print("Nothing to do.")
         return
 
-    # Resume: skip initiatives whose output already exists
+    # Resume: skip initiatives with existing output
     os.makedirs(args.output, exist_ok=True)
     pending = [
         (init_id, f) for init_id, f in selected_files
@@ -837,14 +1009,51 @@ def main():
     ]
     skipped = len(selected_files) - len(pending)
     if skipped:
-        print(f"Resume: {skipped}/{len(selected_files)} output files already exist, "
+        print(f"Resume: {skipped}/{len(selected_files)} already exist, "
               f"{len(pending)} remaining")
 
     if not pending:
         print("\nAll output files already exist. Nothing to do.")
         return
 
-    # Initialize vLLM (deferred until we know there is work)
+    # Load all pending initiative data
+    print(f"\nLoading {len(pending)} initiative files...")
+    t_load = time.time()
+    init_data = {}
+    for init_id, filename in pending:
+        filepath = os.path.join(args.input_dir, filename)
+        with open(filepath, encoding="utf-8") as f:
+            initiative = json.load(f)
+        ca = initiative.get("cluster_assignments", {})
+        if not ca:
+            print(f"  {init_id}: no cluster_assignments, skipping")
+            continue
+        init_data[init_id] = initiative
+    print(f"Loaded {len(init_data)} initiatives in {time.time() - t_load:.1f}s")
+
+    if not init_data:
+        print("\nNo initiatives with cluster assignments. Nothing to do.")
+        return
+
+    # Load previous output for reuse of policy/feedback summaries
+    prev_summaries = {}  # init_id -> {"policy_summary", "feedback_summaries"}
+    if args.prev_output and os.path.isdir(args.prev_output):
+        print(f"\nLoading previous summaries from {args.prev_output}/...")
+        n_prev = 0
+        for init_id in init_data:
+            prev_path = os.path.join(args.prev_output, f"{init_id}.json")
+            if not os.path.isfile(prev_path):
+                continue
+            with open(prev_path, encoding="utf-8") as f:
+                prev = json.load(f)
+            prev_summaries[init_id] = {
+                "policy_summary": prev.get("policy_summary"),
+                "feedback_summaries": prev.get("feedback_summaries", {}),
+            }
+            n_prev += 1
+        print(f"Loaded previous summaries for {n_prev}/{len(init_data)} initiatives")
+
+    # Initialize vLLM
     tp_size = torch.cuda.device_count()
     print(f"\nCUDA device count: {tp_size}")
     print(f"Loading model {args.model} (tp={tp_size})...")
@@ -866,31 +1075,21 @@ def main():
         stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
     )
 
-    # Process each initiative
-    t_total_start = time.time()
+    # Process all initiatives with cross-initiative batching
+    t_total = time.time()
+    process_all_initiatives(
+        init_data, llm, sampling_params, encoding, reasoning_effort,
+        args.batch_size, args.chunk_size, args.combine_budget,
+        args.min_noise_summarize_chars, args.max_model_len, args.output,
+        prev_summaries=prev_summaries,
+    )
 
-    for idx, (init_id, filename) in enumerate(pending, 1):
-        filepath = os.path.join(args.input_dir, filename)
-
-        print(f"\n{'='*60}")
-        print(f"[{idx}/{len(pending)}] Initiative {init_id} ({filename})")
-        print(f"{'='*60}")
-
-        with open(filepath, encoding="utf-8") as f:
-            initiative = json.load(f)
-
-        combine_max_chars = args.combine_budget
-        process_initiative(
-            initiative, llm, sampling_params, encoding, reasoning_effort,
-            args.batch_size, args.chunk_size, combine_max_chars,
-            args.output, init_id,
-        )
-
-    total_elapsed = time.time() - t_total_start
+    total_elapsed = time.time() - t_total
     print(f"\n{'='*60}")
     print(f"ALL DONE in {total_elapsed:.1f}s")
     print(f"{'='*60}")
-    print(f"Processed: {len(pending)}, Skipped: {skipped}, Total: {len(selected_files)}")
+    print(f"Processed: {len(init_data)}, Skipped: {skipped}, "
+          f"Total: {len(selected_files)}")
 
 
 if __name__ == "__main__":

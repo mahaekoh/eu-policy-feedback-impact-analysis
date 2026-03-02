@@ -1,18 +1,50 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ClusterNode, Feedback, computeClusterStats } from "@/lib/types";
+import { ClusterNode, ClusterSummaryEntry, Feedback, computeClusterStats } from "@/lib/types";
 import { FeedbackCard } from "@/components/feedback-card";
 import {
   CountryBar,
   UserTypeBar,
   ClusterDetailStats,
 } from "@/components/cluster-stats-bar";
+import { ExpandableText } from "@/components/expandable-text";
 import { Button } from "@/components/ui/button";
 import { truncateText } from "@/lib/utils";
 import { TimeRange } from "@/components/cluster-view";
 
 const INITIAL_SHOW = 5;
+
+interface DedupedFeedback {
+  feedback: Feedback;
+  duplicateCount: number;
+}
+
+/** Group feedback items with identical feedback_text, keeping one representative per group. */
+function deduplicateFeedback(items: Feedback[]): DedupedFeedback[] {
+  const groups = new Map<string, Feedback[]>();
+  const noText: Feedback[] = [];
+
+  for (const fb of items) {
+    const text = fb.feedback_text;
+    if (!text) {
+      noText.push(fb);
+    } else {
+      const existing = groups.get(text);
+      if (existing) existing.push(fb);
+      else groups.set(text, [fb]);
+    }
+  }
+
+  const result: DedupedFeedback[] = [];
+  for (const [, group] of groups) {
+    result.push({ feedback: group[0], duplicateCount: group.length });
+  }
+  for (const fb of noText) {
+    result.push({ feedback: fb, duplicateCount: 1 });
+  }
+  return result;
+}
 
 function parseFeedbackDate(d: string): number {
   return new Date(d.replace(/\//g, "-")).getTime();
@@ -82,12 +114,14 @@ interface ClusterNodeComponentProps {
   node: ClusterNode;
   isSubCluster?: boolean;
   timeRange: TimeRange;
+  summaryLookup?: Record<string, ClusterSummaryEntry>;
 }
 
 export function ClusterNodeComponent({
   node,
   isSubCluster = false,
   timeRange,
+  summaryLookup,
 }: ClusterNodeComponentProps) {
   const [open, setOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_SHOW);
@@ -108,19 +142,28 @@ export function ClusterNodeComponent({
     (a, b) => b[1] - a[1]
   );
 
-  // Preview text from first non-empty feedback
+  // Cluster summary entry for this node
+  const entry = summaryLookup?.[node.label];
+  const summaryTitle = entry?.title?.replace(/\*\*/g, "") ?? null;
+
+  // Preview text: use summary title, fall back to first non-empty feedback
   let preview = "";
-  for (const fb of items) {
-    const t = fb.combined_feedback_summary || fb.feedback_text;
-    if (t) {
-      preview = truncateText(t, 150);
-      break;
+  if (summaryTitle) {
+    preview = truncateText(summaryTitle, 150);
+  } else {
+    for (const fb of items) {
+      const t = fb.combined_feedback_summary || fb.feedback_text;
+      if (t) {
+        preview = truncateText(t, 150);
+        break;
+      }
     }
   }
 
-  // Leaf items to render (direct items if available, otherwise all)
-  const leafItems =
+  // Leaf items to render (direct items if available, otherwise all), deduped
+  const rawLeafItems =
     node.directItems.length > 0 ? node.directItems : node.allItems;
+  const leafItems = useMemo(() => deduplicateFeedback(rawLeafItems), [rawLeafItems]);
   const visibleItems = leafItems.slice(0, visibleCount);
 
   return (
@@ -165,11 +208,6 @@ export function ClusterNodeComponent({
                     {node.children.length} sub-clusters
                   </span>
                 )}
-                {node.directItems.length > 0 && hasChildren && (
-                  <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-px rounded-lg shrink-0">
-                    {node.directItems.length} unclustered
-                  </span>
-                )}
                 {preview && (
                   <p className="text-xs text-muted-foreground truncate min-w-0">
                     {preview}
@@ -184,6 +222,16 @@ export function ClusterNodeComponent({
       {/* Body */}
       {open && (
         <div className={isSubCluster ? "" : "border-t"}>
+          {entry?.summary && (
+            <div className="px-4 pt-3">
+              <ExpandableText
+                text={entry.summary}
+                maxPreviewChars={500}
+                isMarkdown
+                label="Cluster summary"
+              />
+            </div>
+          )}
           <ClusterDetailStats
             sortedCountries={stats.sortedCountries}
             sortedTypes={stats.sortedTypes}
@@ -193,12 +241,13 @@ export function ClusterNodeComponent({
 
           {hasChildren ? (
             <div className="p-2">
-              {/* Unclustered direct items */}
-              {node.directItems.length > 0 && (
-                <UnclusteredSection items={node.directItems} />
-              )}
-              {/* Sub-clusters sorted by size */}
-              {[...node.children]
+              {/* All sub-clusters (including promoted direct items) sorted by size */}
+              {[...node.children, ...node.directItems.map((fb): ClusterNode => ({
+                  label: `${node.label}.unclustered.${fb.id}`,
+                  directItems: [fb],
+                  children: [],
+                  allItems: [fb],
+                }))]
                 .sort((a, b) => b.allItems.length - a.allItems.length)
                 .map((child) => (
                   <ClusterNodeComponent
@@ -206,13 +255,14 @@ export function ClusterNodeComponent({
                     node={child}
                     isSubCluster
                     timeRange={timeRange}
+                    summaryLookup={summaryLookup}
                   />
                 ))}
             </div>
           ) : (
             <div className="space-y-2 p-3">
-              {visibleItems.map((fb) => (
-                <FeedbackCard key={fb.id} feedback={fb} />
+              {visibleItems.map(({ feedback: fb, duplicateCount }) => (
+                <FeedbackCard key={fb.id} feedback={fb} duplicateCount={duplicateCount} />
               ))}
               {visibleCount < leafItems.length && (
                 <div className="flex justify-center">
@@ -224,7 +274,7 @@ export function ClusterNodeComponent({
                       setVisibleCount(leafItems.length);
                     }}
                   >
-                    Show all {leafItems.length} items (
+                    Show all {leafItems.length} unique items (
                     {leafItems.length - visibleCount} more)
                   </Button>
                 </div>
@@ -237,54 +287,3 @@ export function ClusterNodeComponent({
   );
 }
 
-/** Noise / unclustered items within a parent cluster */
-function UnclusteredSection({ items }: { items: Feedback[] }) {
-  const [open, setOpen] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(3);
-  const visible = items.slice(0, visibleCount);
-
-  return (
-    <div className="ml-5 border-l-2 border-red-300">
-      <button
-        className="w-full text-left px-3 py-2 hover:bg-accent/50 transition-colors cursor-pointer"
-        onClick={() => setOpen(!open)}
-      >
-        <div className="flex items-center gap-2">
-          <span
-            className={`text-xs text-muted-foreground transition-transform ${
-              open ? "rotate-90" : ""
-            }`}
-          >
-            &#9654;
-          </span>
-          <span className="text-[11px] text-red-500 font-medium">
-            Unclustered
-          </span>
-          <span className="text-[11px] font-bold bg-primary text-primary-foreground px-2 py-px rounded-full">
-            {items.length}
-          </span>
-        </div>
-      </button>
-      {open && (
-        <div className="space-y-2 p-3">
-          {visible.map((fb) => (
-            <FeedbackCard key={fb.id} feedback={fb} />
-          ))}
-          {visibleCount < items.length && (
-            <Button
-              variant="ghost"
-              className="w-full text-sm font-semibold text-primary"
-              onClick={(e) => {
-                e.stopPropagation();
-                setVisibleCount(items.length);
-              }}
-            >
-              Show all {items.length} items ({items.length - visibleCount}{" "}
-              more)
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}

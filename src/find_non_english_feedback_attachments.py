@@ -60,6 +60,7 @@ def main():
     initiatives = scan_dir(args.source)
 
     total = 0
+    skipped_translated = 0
     records = []
     for obj in initiatives:
         if "error" in obj:
@@ -79,6 +80,16 @@ def main():
                     continue
                 fb_id = fb["id"]
                 org = fb.get("organization", "")
+
+                # Skip attachments already translated (have extracted_text_before_translation)
+                untranslated = [
+                    a for a in attachments
+                    if not a.get("extracted_text_before_translation")
+                ]
+                skipped_translated += len(attachments) - len(untranslated)
+                attachments = untranslated
+                if not attachments:
+                    continue
 
                 # Filter attachments by repair report if active
                 if repair_set is not None:
@@ -128,6 +139,9 @@ def main():
         print(f"Wrote {len(records)} attachment records to {args.output}")
     else:
         print(f"\nTotal: {total} non-English feedback items with attachments")
+
+    if skipped_translated:
+        print(f"Skipped {skipped_translated} attachments already translated")
 
 
 if __name__ == "__main__":

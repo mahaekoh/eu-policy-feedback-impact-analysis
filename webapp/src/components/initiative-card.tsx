@@ -66,18 +66,18 @@ export function InitiativeCard({ initiative }: InitiativeCardProps) {
 
   return (
     <Link href={`/initiative/${initiative.id}`}>
-      <Card className="relative h-full transition-colors hover:bg-accent/50">
-        {initiative.has_open_feedback && (
-          <Badge className="absolute top-2 right-2 bg-green-600 text-white text-[10px] px-1.5 py-0 opacity-50">
-            Open
-          </Badge>
-        )}
+      <Card className="h-full transition-colors hover:bg-accent/50">
         <CardHeader className="pb-3">
           <CardTitle className="line-clamp-2 text-base leading-snug">
             {initiative.short_title}
           </CardTitle>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             {timeline.length > 0 && <TimelineSparkline counts={timeline} />}
+            {initiative.has_open_feedback && (
+              <Badge className="bg-green-600 text-white text-[10px] px-1.5 py-0 opacity-50">
+                Open
+              </Badge>
+            )}
             <span>
               {topics.length === 0 && stage}
               {topics.length === 1 && `${topics[0]} (${stage})`}

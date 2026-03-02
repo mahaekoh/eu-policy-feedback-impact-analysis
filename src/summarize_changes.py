@@ -5,6 +5,11 @@ JSON files with before_feedback_summary and after_feedback_summary fields. For e
 initiative that has both summaries, computes a unified diff and asks the LLM to
 summarize the substantive policy changes. Adds a 'change_summary' field at top level.
 
+When the combined prompt (before + after + diff) exceeds the chunk size, the before and
+after texts are split into aligned chunks, diffs are computed per chunk pair, and change
+summaries are recursively combined using a character budget — the same strategy used by
+summarize_documents.py.
+
 Initiatives missing either summary are copied through unchanged.
 
 Usage:
@@ -27,10 +32,13 @@ from openai_harmony import (
 )
 from vllm import LLM, SamplingParams
 
-from inference_utils import build_prefill, extract_final_texts, run_batch_inference
+from inference_utils import build_prefill, run_batch_inference
+from text_utils import group_by_char_budget, split_into_chunks
 
 DEFAULT_MODEL = "unsloth/gpt-oss-120b"
 MAX_OUTPUT_TOKENS = 32768 * 4
+CHUNK_SIZE = 16384
+COMBINE_BUDGET = CHUNK_SIZE * 4
 
 IDENTITY_PROMPT = (
     "You are a policy analyst who compares EU regulatory documents "
@@ -49,6 +57,16 @@ CHANGE_SUMMARY_PROMPT = (
     "If any, preserve all points about nuclear energy, nuclear plants, "
     "or small modular reactors. Do not generate any mete commentary "
     "(for example stating that there are no nuclear-related points)."
+)
+
+COMBINE_PREFIX = (
+    "The following are change summaries from consecutive sections of EU policy "
+    "documents before and after a public feedback period. Combine them into a "
+    "single summary up to 10 paragraphs. Focus on policy changes, not formatting. "
+    "Be specific about what was added, removed, or modified. "
+    "If any, preserve all points about nuclear energy, nuclear plants, "
+    "or small modular reactors. Do not generate any mete commentary "
+    "(for example stating that there are no nuclear-related points).\n\n"
 )
 
 
@@ -92,8 +110,16 @@ def main():
         help="Sampling temperature (default: 0.15).",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32,
-        help="Number of prompts per inference batch (default: 32).",
+        "--batch-size", type=int, default=2048,
+        help="Number of prompts per inference batch (default: 2048).",
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=CHUNK_SIZE,
+        help=f"Max chars per chunk for splitting large inputs (default: {CHUNK_SIZE}).",
+    )
+    parser.add_argument(
+        "--combine-budget", type=int, default=COMBINE_BUDGET,
+        help=f"Max chars when grouping summaries for combining (default: {COMBINE_BUDGET}).",
     )
     args = parser.parse_args()
 
@@ -132,12 +158,14 @@ def main():
         return
 
     # Load pending files and build prompts
+    # prompt_map uses (file_index, chunk_index) — chunk_index=0 for single-chunk items
     prompts = []
     prompt_texts = []
-    prompt_map = []       # (file_index, 0) — one prompt per initiative
-    copy_through = []     # file indices that need no inference
-    initiatives = []      # loaded JSON data, indexed by file_index
-    diffs = {}            # file_index -> diff string
+    prompt_map = []
+    item_chunk_counts = {}  # file_index -> number of chunks
+    copy_through = []       # file indices that need no inference
+    initiatives = []        # loaded JSON data, indexed by file_index
+    diffs = {}              # file_index -> diff string (for single-chunk items)
 
     for file_index, filename in enumerate(pending_files):
         filepath = os.path.join(args.input_dir, filename)
@@ -153,27 +181,74 @@ def main():
             continue
 
         diff = compute_diff(before, after)
-        diffs[file_index] = diff
         prompt_text = CHANGE_SUMMARY_PROMPT.format(
             before=before, after=after, diff=diff,
         )
 
-        prefill = build_prefill(encoding, prompt_text, "", reasoning_effort, IDENTITY_PROMPT)
-        if prefill is None:
-            print(f"  {filename}: SKIPPED (encoding failed)")
-            copy_through.append(file_index)
+        # Try single-prompt approach first
+        max_prompt_tokens = args.max_model_len
+        prefill = build_prefill(encoding, prompt_text, "", reasoning_effort,
+                                IDENTITY_PROMPT, max_prompt_tokens)
+        if prefill is not None:
+            n_tokens = len(prefill["prompt_token_ids"])
+            print(f"  {filename}: {len(prompt_text)} chars, {n_tokens} tokens")
+            prompts.append(prefill)
+            prompt_texts.append(prompt_text)
+            prompt_map.append((file_index, 0))
+            item_chunk_counts[file_index] = 1
+            diffs[file_index] = diff
             continue
 
-        n_tokens = len(prefill["prompt_token_ids"])
-        print(f"  {filename}: {len(prompt_text)} chars, {n_tokens} tokens")
-        prompts.append(prefill)
-        prompt_texts.append(prompt_text)
-        prompt_map.append((file_index, 0))
+        # Too large for a single prompt — chunk before and after, diff each pair
+        print(f"  {filename}: too large ({len(prompt_text)} chars), chunking...")
+        before_chunks = split_into_chunks(before, args.chunk_size, label=filename)
+        after_chunks = split_into_chunks(after, args.chunk_size, label=filename)
 
-    n_with_both = len(prompts)
+        # Align chunks: pad the shorter list with empty strings
+        n_chunks = max(len(before_chunks), len(after_chunks))
+        while len(before_chunks) < n_chunks:
+            before_chunks.append("")
+        while len(after_chunks) < n_chunks:
+            after_chunks.append("")
+
+        chunk_count = 0
+        for ci in range(n_chunks):
+            b_chunk = before_chunks[ci]
+            a_chunk = after_chunks[ci]
+            if not b_chunk.strip() and not a_chunk.strip():
+                continue
+            chunk_diff = compute_diff(b_chunk, a_chunk) if b_chunk and a_chunk else ""
+            chunk_prompt_text = CHANGE_SUMMARY_PROMPT.format(
+                before=b_chunk, after=a_chunk, diff=chunk_diff,
+            )
+            chunk_prefill = build_prefill(
+                encoding, chunk_prompt_text, "", reasoning_effort,
+                IDENTITY_PROMPT, max_prompt_tokens,
+            )
+            if chunk_prefill is None:
+                print(f"    chunk {ci+1}/{n_chunks}: SKIPPED (encoding failed)")
+                continue
+            n_tokens = len(chunk_prefill["prompt_token_ids"])
+            print(f"    chunk {ci+1}/{n_chunks}: {len(chunk_prompt_text)} chars, {n_tokens} tokens")
+            prompts.append(chunk_prefill)
+            prompt_texts.append(chunk_prompt_text)
+            prompt_map.append((file_index, chunk_count))
+            chunk_count += 1
+
+        if chunk_count > 0:
+            item_chunk_counts[file_index] = chunk_count
+            diffs[file_index] = diff
+        else:
+            print(f"    {filename}: all chunks failed, copying through")
+            copy_through.append(file_index)
+
+    n_with_both = len(item_chunk_counts)
     n_copy = len(copy_through)
-    print(f"\nInitiatives with both summaries: {n_with_both}")
+    n_multi_chunk = sum(1 for c in item_chunk_counts.values() if c > 1)
+    print(f"\nInitiatives with both summaries: {n_with_both}"
+          f" ({n_multi_chunk} multi-chunk)")
     print(f"Initiatives to copy through (missing before or after): {n_copy}")
+    print(f"Total prompts (pass 1): {len(prompts)}")
 
     # If no prompts, copy everything through without loading the model
     if not prompts:
@@ -204,17 +279,104 @@ def main():
         stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
     )
 
-    # Run inference — single pass, no chunking
-    batch_dir = os.path.join(args.output, "_batches")
-    os.makedirs(batch_dir, exist_ok=True)
+    # === Pass 1: summarize each chunk ===
+    batch_dir_p1 = os.path.join(args.output, "_batches")
+    os.makedirs(batch_dir_p1, exist_ok=True)
 
     summary_cache = {}
-    summarized_chunks, failed_prompts, stats = run_batch_inference(
+    all_failed = []
+    summarized_chunks, failed_p1, stats_p1 = run_batch_inference(
         llm, sampling_params, encoding,
         prompts, prompt_texts, prompt_map,
-        args.batch_size, batch_dir, summary_cache,
-        batch_num_start=0, label="",
+        args.batch_size, batch_dir_p1, summary_cache,
+        batch_num_start=0, label="[P1] ",
     )
+    all_failed.extend(failed_p1)
+
+    # Separate single-chunk finals from multi-chunk items needing combining
+    final_summaries = {}  # file_index -> final change summary
+    current_parts = {}    # file_index -> [chunk_summaries...] for combining
+
+    for file_index, n_chunks in item_chunk_counts.items():
+        chunks_dict = summarized_chunks.get(file_index, {})
+        if n_chunks == 1:
+            if 0 in chunks_dict:
+                final_summaries[file_index] = chunks_dict[0]
+        else:
+            parts = []
+            for ci in range(n_chunks):
+                if ci in chunks_dict:
+                    parts.append(chunks_dict[ci])
+            if parts:
+                if len(parts) == 1:
+                    final_summaries[file_index] = parts[0]
+                else:
+                    current_parts[file_index] = parts
+
+    print(f"\nPass 1 results: {len(final_summaries)} single-chunk items done, "
+          f"{len(current_parts)} multi-chunk items need combining")
+
+    # === Pass 2: Recursively combine chunk summaries ===
+    combine_budget = args.combine_budget
+    combine_level = 0
+    batch_dir_p2 = os.path.join(args.output, "_batches_combine")
+    os.makedirs(batch_dir_p2, exist_ok=True)
+    batch_num_p2 = 0
+
+    while current_parts:
+        combine_level += 1
+
+        p2_prompts = []
+        p2_texts = []
+        p2_prompt_map = []
+
+        for file_index, parts in current_parts.items():
+            chunk_groups = group_by_char_budget(parts, combine_budget)
+            for gi, group in enumerate(chunk_groups):
+                if len(group) == 1:
+                    continue
+                combined = "\n\n".join(group)
+                prefill = build_prefill(
+                    encoding, combined, COMBINE_PREFIX, reasoning_effort,
+                    IDENTITY_PROMPT, args.max_model_len,
+                )
+                if prefill is None:
+                    print(f"  WARNING: combine prefill failed for file_index={file_index} group={gi}")
+                    continue
+                p2_prompts.append(prefill)
+                p2_texts.append(combined)
+                p2_prompt_map.append((file_index, gi))
+
+        print(f"\n--- Combine level {combine_level}: {len(p2_prompts)} prompts "
+              f"from {len(current_parts)} items ---\n")
+
+        p2_results = {}
+        if p2_prompts:
+            p2_results, failed_p2, stats_p2 = run_batch_inference(
+                llm, sampling_params, encoding,
+                p2_prompts, p2_texts, p2_prompt_map,
+                args.batch_size, batch_dir_p2, summary_cache,
+                batch_num_start=batch_num_p2, label=f"[C{combine_level}] ",
+            )
+            batch_num_p2 = stats_p2["batch_num"]
+            all_failed.extend(failed_p2)
+
+        next_parts = {}
+        for file_index, parts in current_parts.items():
+            chunk_groups = group_by_char_budget(parts, combine_budget)
+            new_parts = []
+            for gi, group in enumerate(chunk_groups):
+                if len(group) == 1:
+                    new_parts.append(group[0])
+                elif file_index in p2_results and gi in p2_results[file_index]:
+                    new_parts.append(p2_results[file_index][gi])
+
+            if len(new_parts) == 1:
+                final_summaries[file_index] = new_parts[0]
+            elif len(new_parts) > 1:
+                next_parts[file_index] = new_parts
+
+        current_parts = next_parts
 
     # Write output files
     written = 0
@@ -222,11 +384,10 @@ def main():
     for file_index, filename in enumerate(pending_files):
         initiative = initiatives[file_index]
 
-        # Add change_summary and diff if we got one
-        result = summarized_chunks.get(file_index, {}).get(0)
-        if result is not None:
-            initiative["change_summary"] = result
-            initiative["diff"] = diffs[file_index]
+        if file_index in final_summaries:
+            initiative["change_summary"] = final_summaries[file_index]
+            if file_index in diffs:
+                initiative["diff"] = diffs[file_index]
             summaries_added += 1
 
         out_path = os.path.join(args.output, filename)
@@ -243,11 +404,11 @@ def main():
     print(f"Change summaries added: {summaries_added}/{n_with_both}")
     print(f"Copied through unchanged: {n_copy}")
 
-    if failed_prompts:
+    if all_failed:
         failed_file = os.path.join(args.output, "_failed.json")
         with open(failed_file, "w", encoding="utf-8") as f:
-            json.dump(failed_prompts, f, ensure_ascii=False, indent=2)
-        print(f"FAILED: {len(failed_prompts)} prompts could not be parsed. Wrote {failed_file}")
+            json.dump(all_failed, f, ensure_ascii=False, indent=2)
+        print(f"FAILED: {len(all_failed)} prompts could not be parsed. Wrote {failed_file}")
 
 
 if __name__ == "__main__":
