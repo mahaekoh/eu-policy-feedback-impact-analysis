@@ -92,6 +92,8 @@ export interface Initiative {
   before_feedback_summary?: string;
   after_feedback_summary?: string;
   change_summary?: string;
+  cluster_policy_summary?: ClusterSummaryEntry | null;
+  cluster_summaries?: Record<string, ClusterSummaryEntry> | null;
 }
 
 export interface InitiativeSummary {

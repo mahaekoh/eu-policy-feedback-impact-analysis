@@ -27,10 +27,13 @@ data/
     unit_summaries/                # build_unit_summaries output
     change_summaries/              # summarize_changes output
   clustering/                      # Clustering output (per-scheme subdirs)
+  embeddings/                      # Cached sentence embeddings (per-model subdirs)
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
   webapp/                          # Pre-computed webapp data
     initiative_index.json          # Pre-built initiative index
+    global_stats.json              # Aggregate cross-initiative statistics
+    country_stats.json             # Per-country drill-down statistics
     initiative_details/            # Stripped copies (no attachment extracted_text)
 ```
 
@@ -49,10 +52,12 @@ initiative_stats.py               → data/analysis/before_after/*.json
 summarize_documents.py            → data/analysis/summaries/*.json
 build_unit_summaries.py           → data/analysis/unit_summaries/*.json
 summarize_changes.py              → data/analysis/change_summaries/*.json
+merge_change_summaries.py         → updates data/scrape/initiative_details/*.json in-place
 cluster_all_initiatives.py        → data/clustering/<scheme>/*.json
 classify_initiative_and_feedback.py → data/classification/*.json
-summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json
-build_webapp_index.py             → data/webapp/initiative_index.json + data/webapp/initiative_details/
+summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json + _cluster_cache.json
+merge_cluster_feedback_summaries.py → updates data/scrape/initiative_details/*.json in-place
+build_webapp_index.py             → data/webapp/initiative_index.json + global_stats.json + country_stats.json + initiative_details/
 ```
 
 ## Pipeline orchestration
@@ -82,7 +87,7 @@ Push/pull operations use parallel rsync (4 streams by default) with `--files-fro
 
 **`src/scrape_eu_initiatives.py`** — Scrapes all EU "Have Your Say" initiatives from the Better Regulation API (no date filter — fetches everything available). Fetches all pages in parallel (10 workers). Outputs `data/scrape/eu_initiatives.csv` (flat extracted fields) and `data/scrape/eu_initiatives_raw.json` (full API data for each initiative). Supports `-o` for custom output path.
 
-**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Each output JSON includes a `last_cached_at` ISO 8601 timestamp. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments. Supports `--max-age HOURS` (default 48) for incremental updates: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age.
+**`src/scrape_eu_initiative_details.py`** — Fetches detailed data for each initiative (publications, feedback, attachments) and extracts text from attached files. Uses 20-thread parallelism. For `.doc/.docx/.odt/.rtf` files, tries PDF extraction first (many uploads are mislabeled PDFs), then falls back to the format-specific pipeline. Supports PDF (pymupdf with OCR fallback), DOCX (docx2md), DOC (macOS textutil), RTF/ODT (pypandoc), and TXT. Outputs per-initiative JSON files to `data/scrape/initiative_details/`. Each output JSON includes a `last_cached_at` ISO 8601 timestamp. Supports `--cache-dir` / `-c` to cache downloaded publication document files to disk (as `{cache_dir}/{init_id}/pub{pub_id}_doc{doc_id}_{filename}`), so re-runs and retry passes reuse cached files instead of re-downloading. Only publication-level documents are cached, not feedback attachments. Supports `--max-age HOURS` (default 48) for incremental updates: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age. Top-level derived fields (e.g. `change_summary`, `diff`) are also preserved from the old record when re-scraping.
 
 ### Analysis / reporting
 
@@ -118,17 +123,27 @@ Push/pull operations use parallel rsync (4 streams by default) with `--files-fro
 
 **`src/summarize_changes.py`** — Summarizes substantive changes between before- and after-feedback documents using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes the output of `build_unit_summaries.py`. For each initiative with both `before_feedback_summary` and `after_feedback_summary`, computes a unified diff and asks the LLM to describe what changed in up to 10 paragraphs. Adds `change_summary` field at top level. Initiatives missing either summary are copied through unchanged. Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Per-batch result files in `_batches/` provide crash recovery.
 
+**`src/merge_change_summaries.py`** — Merges change summaries back into initiative detail JSON files. Sets `change_summary` and `diff` at the top level of each initiative JSON. Supports `--dry-run`.
+
 ### Clustering & classification
 
 **`src/cluster_all_initiatives.py`** — Clusters feedback across initiatives using sentence embeddings. Supports agglomerative and HDBSCAN algorithms with configurable parameters. Reads from `data/analysis/unit_summaries/`, writes per-scheme output to `data/clustering/<scheme>/`. Scheme names encode the algorithm, model, and parameters (e.g. `agglomerative_google_embeddinggemma-300m_distance_threshold=0.75_...`). Uses a three-pass architecture: (1) load all initiatives and collect texts, (2) batch-encode all texts at once with multi-GPU support via SentenceTransformer's multi-process pool, (3) cluster each initiative from pre-computed embeddings. Supports `--skip-existing` to resume interrupted runs.
 
 **`src/classify_initiative_and_feedback.py`** — Classifies initiatives and their feedback using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes unit summaries as input, writes per-initiative classification JSONs to `data/classification/`.
 
-**`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`. Produces titled summaries at three levels: (1) a policy summary from initiative documents, (2) a titled summary per feedback item (feedback text + attachments), (3) recursive bottom-up cluster summaries that greedily combine child summaries within a character budget (`--combine-budget`, default 65,536). Long texts are chunked at sentence boundaries (default 16,384 chars). Supports resume: skips initiatives whose output already exists. Per-batch result files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery.
+**`src/summarize_clusters.py`** — Summarizes feedback clusters using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes clustering output from `data/clustering/<scheme>/`, writes cluster summaries to `data/cluster_summaries/<scheme>/`. Produces titled summaries at three levels: (1) a policy summary from initiative documents, (2) a titled summary per feedback item (feedback text + attachments), (3) recursive bottom-up cluster summaries that greedily combine child summaries within a character budget (`--combine-budget`, default 65,536). Long texts are chunked at sentence boundaries (default 16,384 chars). Supports resume: skips initiatives whose output already exists. Per-batch result files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery. Phase 1 reuses `cluster_feedback_summary` from initiative_details (set by `merge_cluster_feedback_summaries.py`) when available, avoiding redundant LLM calls for feedback items whose summaries survive re-scrapes. Phase 3 uses a content-addressed cache (`_cluster_cache.json`) keyed by SHA-256 of sorted feedback IDs under each cluster label, so clusters with unchanged membership skip LLM inference.
+
+**`src/merge_cluster_feedback_summaries.py`** — Merges per-feedback titled summaries from cluster summary output back into initiative detail JSON files. Sets `cluster_feedback_summary` (with `title` and `summary`) on each feedback item. This field survives re-scrapes because the scrape merge strategy preserves derived fields on feedback items when `feedback_text` is unchanged. Supports `--dry-run`.
 
 ### Webapp index
 
-**`src/build_webapp_index.py`** — Pre-computes the webapp initiative index and creates stripped copies of initiative detail JSONs. Reads from `data/scrape/initiative_details/`, writes `data/webapp/initiative_index.json` (single JSON array of all initiative summaries with pre-computed country counts, user type counts, feedback timelines, etc.) and `data/webapp/initiative_details/*.json` (copies with `extracted_text`, `extracted_text_without_ocr`, and `extracted_text_before_translation` stripped from feedback attachments to reduce file sizes). Deduplicates initiatives sharing identical sorted feedback ID sets, keeping the one with the most feedback. Supports `-o` for custom index output path.
+**`src/build_webapp_index.py`** — Pre-computes the webapp initiative index, aggregate statistics, and per-country drill-down data. Reads from `data/scrape/initiative_details/`, writes:
+- `data/webapp/initiative_index.json` — single JSON array of all initiative summaries with pre-computed country counts, user type counts, feedback timelines, etc.
+- `data/webapp/global_stats.json` — aggregate cross-initiative statistics (totals, by-country, by-topic, by-user-type, by-department, by-stage, cross-tabs, monthly time series).
+- `data/webapp/country_stats.json` — per-country drill-down statistics: top 20 topics, user type breakdown, top 20 initiatives, 20 most recent feedback items (with attachment links), and top-5 topic timeline.
+- `data/webapp/initiative_details/*.json` — stripped copies with `extracted_text`, `extracted_text_without_ocr`, and `extracted_text_before_translation` removed from feedback attachments to reduce file sizes.
+
+Deduplicates initiatives sharing identical sorted feedback ID sets, keeping the one with the most feedback. Supports `-o` for custom index output path.
 
 ### Webapp
 
@@ -139,18 +154,26 @@ A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback i
 **Pages:**
 - `/` — Initiative index with search, sort, filters, pagination (50/page). Deduplicates initiatives sharing identical feedback IDs.
 - `/initiative/[id]` — Initiative detail with publications view (documents + feedback) and cluster view. Empty/disabled publications shown as compact links.
+- `/charts` — Aggregate feedback statistics with country drill-down. Global view shows time series, country/topic/user-type breakdowns, cross-tabs. Country dropdown (`?country=CODE` URL param) switches to per-country view with top topics, top initiatives, topic timeline, and recent feedback with attachment links.
 
 **API routes:**
 - `/api/auth/[...nextauth]` — NextAuth OAuth handlers
 - `/api/clusters/[id]` — Fetch clustering data for an initiative by scheme
 
 **Key lib files:**
-- `src/lib/data.ts` — Server-side data loading from `../data/webapp/`. Reads pre-built `initiative_index.json` for the index page and stripped initiative details (no attachment extracted_text) for detail pages. 5-minute cache TTL.
-- `src/lib/types.ts` — TypeScript interfaces for Initiative, Publication, Feedback, Attachment, ClusterData, etc.
+- `src/lib/data.ts` — Server-side data loading with 5-minute in-memory cache TTL. Provides `getInitiativeIndex()`, `getGlobalStats()`, `getCountryStats()`, `getInitiativeDetail()`, `getClusteringSchemesForInitiative()`, `getClusterData()`.
+- `src/lib/types.ts` — TypeScript interfaces for Initiative, Publication, Feedback, Attachment, ClusterData, GlobalStats, CountryStatsEntry, etc.
 - `src/auth.ts` — Auth.js config with Google provider
 - `src/proxy.ts` — Session cookie refresh (Next.js 16 middleware proxy)
 
-**Running:** `cd webapp && npm run dev` (reads data from `../data/webapp/` for index and initiative details, `../data/clustering/` for cluster data). Requires `build_webapp_index.py` to have been run first.
+**Data paths used at runtime** (all relative to `webapp/`):
+- `../data/webapp/initiative_index.json` — initiative list for index page
+- `../data/webapp/global_stats.json` — aggregate stats for charts page
+- `../data/webapp/country_stats.json` — per-country stats for charts country drill-down
+- `../data/webapp/initiative_details/*.json` — stripped initiative details for detail pages
+- `../data/clustering/<scheme>/*.json` — cluster assignments for cluster view
+
+**Running:** `cd webapp && npm run dev`. Requires `build_webapp_index.py` to have been run first.
 
 ### Viewers
 

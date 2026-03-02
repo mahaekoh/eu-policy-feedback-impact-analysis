@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { ClusterData, ClusterSummaries, CountryStats, GlobalStats, Initiative, InitiativeSummary } from "./types";
+import { ClusterData, CountryStats, GlobalStats, Initiative, InitiativeSummary } from "./types";
 
 const WEBAPP_DATA_DIR = path.join(process.cwd(), "..", "data", "webapp");
 
@@ -14,7 +14,6 @@ const COUNTRY_STATS_PATH = path.join(WEBAPP_DATA_DIR, "country_stats.json");
 
 const CLUSTERING_DIR = path.join(process.cwd(), "..", "data", "clustering");
 
-const CLUSTER_SUMMARIES_DIR = path.join(process.cwd(), "..", "data", "cluster_summaries");
 
 let cachedIndex: InitiativeSummary[] | null = null;
 let cachedIndexAt = 0;
@@ -112,27 +111,9 @@ export async function getClusteringSchemesForInitiative(
   return schemes;
 }
 
-/** Load cluster summaries for a specific initiative + scheme */
-function getClusterSummaries(
-  id: string,
-  scheme: string
-): ClusterSummaries | null {
-  const filePath = path.join(CLUSTER_SUMMARIES_DIR, scheme, `${id}.json`);
-  if (!fs.existsSync(filePath)) return null;
-
-  try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    const data = JSON.parse(content);
-    return {
-      policy_summary: data.policy_summary ?? null,
-      cluster_summaries: data.cluster_summaries ?? {},
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** Load cluster data for a specific initiative + scheme */
+/** Load cluster data for a specific initiative + scheme.
+ *  Cluster summaries come from the initiative detail JSON (merged by
+ *  merge_cluster_feedback_summaries.py) rather than separate files. */
 export async function getClusterData(
   id: string,
   scheme: string
@@ -144,6 +125,8 @@ export async function getClusterData(
   const content = fs.readFileSync(filePath, "utf-8");
   const data = JSON.parse(content);
 
+  const initiative = await getInitiativeDetail(id);
+
   return {
     cluster_model: data.cluster_model,
     cluster_algorithm: data.cluster_algorithm,
@@ -152,6 +135,9 @@ export async function getClusterData(
     cluster_noise_count: data.cluster_noise_count,
     cluster_silhouette: data.cluster_silhouette ?? null,
     cluster_assignments: data.cluster_assignments || {},
-    cluster_summaries: getClusterSummaries(id, scheme),
+    cluster_summaries: initiative ? {
+      policy_summary: initiative.cluster_policy_summary ?? null,
+      cluster_summaries: initiative.cluster_summaries ?? {},
+    } : null,
   };
 }
