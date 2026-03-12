@@ -275,14 +275,75 @@ The output files are standard JSON. You can explore them with:
 - **jq** (command line): e.g. `jq '.publications[0].feedback | length' data/scrape/initiative_details/12970.json` to count feedback items
 - **Any JSON viewer**: browser extensions, VS Code, or online tools like [jsoncrack.com](https://jsoncrack.com)
 
-## Configuration Files
+## Running the Full Pipeline
 
-- **`pipeline.conf`** — pipeline orchestration config (remote host, SSH key, clustering schemes). Copy from `pipeline.conf.example`.
+The pipeline has 28 stages that alternate between local processing and remote GPU computation. Here is the complete stage order:
 
-## Running the Pipeline
+| # | Stage | Location | Description |
+|---|---|---|---|
+| 1 | `scrape` | local | Scrape initiative list and per-initiative details |
+| 2 | `find-short-pdfs` | local | Find PDFs with suspiciously short extracted text |
+| 3 | `deploy` | local→remote | Sync source code to remote GPU host |
+| 4–6 | `push ocr` → `remote ocr` → `pull ocr` | remote GPU | OCR scanned PDFs (EasyOCR, multi-GPU) |
+| 7 | `merge-ocr` | local | Merge OCR results back into initiative JSONs |
+| 8 | `find-nonenglish` | local | Find non-English feedback attachments |
+| 9–11 | `push translation` → `remote translate` → `pull translation` | remote GPU | Translate to English (120B LLM) |
+| 12 | `merge-translations` | local | Merge translations back |
+| 13 | `analyze` | local | Compute before/after feedback structure |
+| 14–16 | `push analysis` → `remote summarize` → `pull summaries` | remote GPU | Summarize documents and feedback (120B LLM) |
+| 17 | `build-summaries` | local | Consolidate per-document summaries |
+| 18–20 | `push unit-summaries` → `remote cluster` → `pull clustering` | remote GPU | Cluster feedback (sentence embeddings, multi-GPU) |
+| 21 | `build-index` | local | Pre-compute webapp index and statistics |
+| 22–24 | `push clustering` → `remote summarize-clusters` → `pull cluster-summaries` | remote GPU | Summarize clusters (120B LLM) |
+| 25 | `merge-cluster-feedback-summaries` | local | Merge cluster summaries back (per scheme) |
+| 26–27 | `remote summarize-changes` → `pull change-summaries` | remote GPU | Detect before/after changes (120B LLM) |
+| 28 | `merge-change-summaries` | local | Merge change summaries back |
 
-The pipeline is orchestrated by `pipeline.sh`. See `./pipeline.sh list` for all stages, or run `./pipeline.sh full` for the complete end-to-end pipeline. Remote GPU jobs run via `nohup` to survive SSH disconnects — use `./pipeline.sh logs` to monitor them.
+All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. All stages support resume (skip already-processed items) and crash recovery (per-batch result files).
 
-## Technical Details
+## Pipeline Orchestration
 
-For a complete technical breakdown of each pipeline component, dependencies, data schemas, and instructions for running the pipeline, see [ARCHITECTURE.md](ARCHITECTURE.md).
+`pipeline.sh` orchestrates the full pipeline. Copy `pipeline.conf.example` to `pipeline.conf` and fill in your remote GPU host details.
+
+### Configuration (`pipeline.conf`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `REMOTE_HOST` | — | SSH host (e.g. `user@gpu-host`) |
+| `REMOTE_DIR` | — | Remote working directory |
+| `SSH_KEY` | — | Path to SSH private key |
+| `PYTHON` | `python3` | Python executable on remote |
+| `CLUSTER_SCHEMES` | — | Space-separated clustering scheme names. Each name encodes algorithm and parameters; `pipeline.sh` parses them into CLI flags. |
+
+### Commands
+
+```bash
+./pipeline.sh list                     # Show all 28 stages
+./pipeline.sh full                     # Run entire pipeline end-to-end
+./pipeline.sh <stage>                  # Run a single stage
+./pipeline.sh deploy                   # Sync src/ to remote
+./pipeline.sh remote <step>            # Run GPU step on remote
+./pipeline.sh push <target>            # Upload data to remote
+./pipeline.sh pull <target>            # Download results from remote
+./pipeline.sh logs                     # List recent remote logs
+./pipeline.sh logs tail <step>         # Tail a specific step's log
+./pipeline.sh clean-batches <target>   # Delete batch recovery files on remote
+```
+
+**Push targets:** `ocr`, `translation`, `analysis`, `unit-summaries`, `clustering`, `all`
+
+**Pull targets:** `ocr`, `translation`, `summaries`, `classification`, `clustering`, `embeddings`, `cluster-summaries`, `change-summaries`, `logs`, `all`
+
+**Remote GPU steps:** `ocr`, `translate`, `summarize`, `classify`, `cluster`, `summarize-clusters`, `summarize-changes`
+
+### Remote execution model
+
+- GPU jobs run via `nohup` with stdout/stderr piped to log files under `logs/` on the remote host
+- Long-running jobs survive SSH disconnects; the local terminal tails the log in real-time
+- Exit code is read from a `.exit` status file when the job completes
+- Batch recovery directories (`_batches*`) are auto-cleaned after successful runs
+- Push/pull operations use parallel rsync (4 streams) with `--files-from` chunking for efficient large-directory transfers
+
+## Technical Reference
+
+For a complete technical breakdown of every pipeline script (all CLI arguments, defaults, input/output paths), utility libraries, webapp components, TypeScript interfaces, and data loading details, see [CLAUDE.md](CLAUDE.md).
