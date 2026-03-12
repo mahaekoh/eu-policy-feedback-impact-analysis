@@ -1,6 +1,22 @@
 # EU Policy Feedback Impact Analysis
 
-A data pipeline for studying whether public consultation feedback influences EU policy documents published through the European Commission's ["Have Your Say"](https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives_en) portal.
+A data pipeline and web platform for studying whether public consultation feedback influences EU policy documents published through the European Commission's ["Have Your Say"](https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives_en) portal.
+
+## Table of Contents
+
+- [Research Question](#research-question)
+- [Methodology](#methodology)
+- [Data Source](#data-source)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
+- [What the Pipeline Produces](#what-the-pipeline-produces)
+- [Data Structure](#data-structure)
+- [Key Numbers](#key-numbers)
+- [Scope and Limitations](#scope-and-limitations)
+- [Running the Full Pipeline](#running-the-full-pipeline)
+- [Pipeline Orchestration](#pipeline-orchestration)
+- [Working with the Data](#working-with-the-data)
 
 ## Research Question
 
@@ -21,6 +37,110 @@ The analysis follows a documentary comparison approach:
 7. **Unify** per-initiative summaries into consolidated before/after/feedback summary fields for downstream analysis
 
 All 2,970 initiatives with feedback are included in the before/after analysis, even when no documents were published after the feedback period.
+
+## Requirements
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | >= 3.12 | See `.python-version` |
+| [uv](https://docs.astral.sh/uv/) | latest | Python package manager (lockfile: `uv.lock`) |
+| Node.js | >= 18 | For the webapp only |
+| NVIDIA GPU | H100 recommended | For OCR, translation, summarization, clustering, classification. Not needed for scraping, merging, or the webapp. |
+| macOS `textutil` | (system) | DOC text extraction (macOS only; optional) |
+
+### Key Python dependencies
+
+| Package | Purpose |
+|---|---|
+| pymupdf / pymupdf4llm | PDF text extraction with tesseract OCR fallback (300 DPI) |
+| docx2md | DOCX text extraction |
+| pypandoc / pypandoc_binary | RTF and ODT text extraction |
+| easyocr | GPU-accelerated OCR (CUDA) |
+| vllm | LLM batch inference engine |
+| openai_harmony | Structured prompt encoding for `unsloth/gpt-oss-120b` |
+| sentence_transformers | Sentence embeddings (`google/embeddinggemma-300m`) |
+| scikit-learn / hdbscan | Feedback clustering algorithms |
+| cuML (optional) | GPU-accelerated clustering via RAPIDS |
+
+## Quick Start
+
+### 1. Install Python dependencies
+
+```bash
+uv sync
+```
+
+### 2. Scrape initiatives (local, no GPU needed)
+
+```bash
+# Scrape all initiative metadata from the Better Regulation API
+python src/scrape_eu_initiatives.py
+
+# Scrape detailed data for each initiative (publications, feedback, attachments)
+# with text extraction from all attached files
+python src/scrape_eu_initiative_details.py -c data/scrape/doc_cache
+```
+
+### 3. Run GPU-accelerated stages (requires remote GPU host)
+
+```bash
+# Copy pipeline config and fill in remote host details
+cp pipeline.conf.example pipeline.conf
+
+# Deploy code to remote, run summarization, pull results
+./pipeline.sh deploy
+./pipeline.sh remote summarize
+./pipeline.sh pull summaries
+
+# Or run the entire 28-stage pipeline end-to-end
+./pipeline.sh full
+```
+
+### 4. Browse results in the web app
+
+```bash
+# Pre-compute webapp data (aggregated statistics, stripped initiative details)
+python src/build_webapp_index.py data/scrape/initiative_details
+
+# Start the webapp
+cd webapp && npm install && npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) to browse initiatives, feedback, summaries, and clusters. No sign-in required.
+
+## Project Structure
+
+```
+.
+├── src/                           # Python pipeline scripts (24 scripts)
+│   ├── scrape_*.py                #   Scraping (2 scripts)
+│   ├── find_*.py                  #   Analysis / data quality (4 scripts)
+│   ├── ocr_*.py, merge_ocr_*.py  #   OCR pipeline (2 scripts)
+│   ├── translate_*.py, merge_translations.py  #   Translation (2 scripts)
+│   ├── initiative_stats.py        #   Before/after analysis
+│   ├── summarize_*.py             #   LLM summarization (3 scripts)
+│   ├── build_unit_summaries.py    #   Summary consolidation
+│   ├── merge_*_summaries.py       #   Merge results back (2 scripts)
+│   ├── cluster_all_initiatives.py #   Sentence-embedding clustering
+│   ├── classify_*.py              #   LLM classification
+│   ├── build_webapp_index.py      #   Pre-compute webapp data
+│   ├── text_utils.py              #   Shared text chunking/filtering
+│   ├── inference_utils.py         #   Shared vLLM batch inference helpers
+│   └── print_chunk.py             #   Debug utility
+├── webapp/                        # Next.js 16 web application
+│   ├── src/app/                   #   Pages: /, /initiative/[id], /charts
+│   ├── src/components/            #   14 React components + shadcn/ui
+│   ├── src/lib/                   #   Data loading, types, utilities
+│   └── AUTH.md                    #   Google OAuth setup guide
+├── viewers/                       # Standalone HTML viewers (no dependencies)
+│   ├── viewer.html                #   Initiative JSON browser
+│   └── feedback-viewer.html       #   Clustered feedback browser
+├── pipeline.sh                    # Pipeline orchestration (28 stages)
+├── pipeline.conf.example          # Pipeline config template
+├── pyproject.toml                 # Python project metadata
+├── CLAUDE.md                      # Full technical reference
+└── data/                          # All pipeline data (gitignored)
+```
 
 ## Data Source
 
