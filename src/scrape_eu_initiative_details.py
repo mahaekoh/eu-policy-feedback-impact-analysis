@@ -874,8 +874,12 @@ def needs_update(path: Path, max_age_hours: float) -> bool:
 
     # ADOPTION_WORKFLOW: only update if feedback is still open/upcoming
     if m_stage and m_stage.group(1) == "ADOPTION_WORKFLOW":
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            print(f"  WARNING: corrupt JSON, will re-fetch: {path.name}")
+            return True
         statuses = {
             pub.get("feedback_status", "")
             for pub in data.get("publications", [])
@@ -911,9 +915,18 @@ def main(out_dir: str = None, cache_dir: str = None, max_age_hours: float = 48):
             init_id = int(p.stem)
         except ValueError:
             continue
-        if needs_update(p, max_age_hours):
-            with open(p, encoding="utf-8") as f:
-                data = json.load(f)
+        try:
+            stale = needs_update(p, max_age_hours)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            print(f"  WARNING: corrupt JSON, will re-fetch from scratch: {p.name}")
+            continue  # treated as new (not in skip_ids or stale_records)
+        if stale:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                print(f"  WARNING: corrupt JSON, will re-fetch from scratch: {p.name}")
+                continue
             if "error" not in data:
                 stale_records[init_id] = data
             # else: error files are treated as new (re-fetch from scratch)
