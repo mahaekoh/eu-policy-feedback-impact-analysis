@@ -50,6 +50,28 @@ stage_end() {
     echo "============================================================"
 }
 
+# Count JSON files in a directory (excluding _* batch dirs/files).
+count_json() {
+    local dir="$1"
+    local label="${2:-input files}"
+    if [ -d "$dir" ]; then
+        local n
+        n=$(find "$dir" -maxdepth 1 -name '*.json' ! -name '_*' 2>/dev/null | wc -l | tr -d ' ')
+        echo "  Tasks: $n $label"
+    fi
+}
+
+# Count records in a JSON array file.
+count_json_records() {
+    local file="$1"
+    local label="${2:-records}"
+    if [ -f "$file" ]; then
+        local n
+        n=$($PYTHON -c "import json; print(len(json.load(open('$file'))))" 2>/dev/null || echo "?")
+        echo "  Tasks: $n $label"
+    fi
+}
+
 run_local() {
     local name="$1"; shift
     stage_start "$name"
@@ -317,11 +339,13 @@ do_setup_remote() {
 do_scrape() {
     run_local "scrape initiatives" \
         $PYTHON src/scrape_eu_initiatives.py "$@"
+    count_json data/scrape/initiative_details "cached initiative details"
     run_local "scrape initiative details" \
         $PYTHON src/scrape_eu_initiative_details.py "$@"
 }
 
 do_find_short_pdfs() {
+    count_json data/scrape/initiative_details "initiative files to scan"
     run_local "find short PDF extractions" \
         $PYTHON src/find_short_pdf_extractions.py \
             data/scrape/initiative_details \
@@ -329,6 +353,7 @@ do_find_short_pdfs() {
 }
 
 do_find_nonenglish() {
+    count_json data/scrape/initiative_details "initiative files to scan"
     run_local "find non-English attachments" \
         $PYTHON src/find_non_english_feedback_attachments.py \
             data/scrape/initiative_details \
@@ -336,6 +361,7 @@ do_find_nonenglish() {
 }
 
 do_merge_ocr() {
+    count_json_records data/ocr/short_pdf_report_ocr.json "OCR records"
     run_local "merge OCR results" \
         $PYTHON src/merge_ocr_results.py \
             data/ocr/short_pdf_report_ocr.json \
@@ -343,6 +369,7 @@ do_merge_ocr() {
 }
 
 do_merge_translations() {
+    count_json_records data/translation/non_english_attachments_translated.json "translation records"
     run_local "merge translations" \
         $PYTHON src/merge_translations.py \
             data/translation/non_english_attachments_translated.json \
@@ -350,6 +377,7 @@ do_merge_translations() {
 }
 
 do_analyze() {
+    count_json data/scrape/initiative_details "initiative files to analyze"
     run_local "initiative stats / before-after analysis" \
         $PYTHON src/initiative_stats.py \
             data/scrape/initiative_details \
@@ -357,6 +385,7 @@ do_analyze() {
 }
 
 do_build_summaries() {
+    count_json data/analysis/summaries "summary files to process"
     run_local "build unit summaries" \
         $PYTHON src/build_unit_summaries.py \
             data/analysis/summaries/ \
@@ -368,6 +397,7 @@ do_cluster() {
         echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
         exit 1
     fi
+    count_json data/analysis/unit_summaries "unit summary files to cluster"
     for scheme in $CLUSTER_SCHEMES; do
         parse_scheme "$scheme"
         local out_dir
@@ -384,6 +414,7 @@ do_cluster() {
 }
 
 do_build_index() {
+    count_json data/scrape/initiative_details "initiative files to index"
     run_local "build webapp index" \
         $PYTHON src/build_webapp_index.py \
             data/scrape/initiative_details \
@@ -391,6 +422,7 @@ do_build_index() {
 }
 
 do_merge_change_summaries() {
+    count_json data/analysis/change_summaries "change summary files"
     run_local "merge change summaries" \
         $PYTHON src/merge_change_summaries.py \
             data/analysis/change_summaries \
@@ -403,6 +435,7 @@ do_merge_cluster_feedback_summaries() {
         exit 1
     fi
     for scheme in $CLUSTER_SCHEMES; do
+        count_json "data/cluster_summaries/${scheme}" "cluster summary files ($scheme)"
         run_local "merge cluster feedback summaries ($scheme)" \
             $PYTHON src/merge_cluster_feedback_summaries.py \
                 "data/cluster_summaries/${scheme}" \
@@ -426,32 +459,38 @@ do_push() {
     case "$target" in
         initiative-details)
             stage_start "push initiative details"
+            count_json data/scrape/initiative_details "initiative files"
             rsync_to_remote data/scrape/initiative_details/ data/scrape/initiative_details/
             stage_end "push initiative details"
             ;;
         ocr)
             stage_start "push ocr data"
+            count_json data/ocr "OCR files"
             rsync_to_remote data/ocr/ data/ocr/
             stage_end "push ocr data"
             ;;
         translation)
             stage_start "push translation input"
+            count_json_records data/translation/non_english_attachments.json "attachment records"
             rsync_to_remote data/translation/non_english_attachments.json \
                 data/translation/non_english_attachments.json
             stage_end "push translation input"
             ;;
         analysis)
             stage_start "push before-after analysis"
+            count_json data/analysis/before_after "before-after files"
             rsync_to_remote data/analysis/before_after/ data/analysis/before_after/
             stage_end "push before-after analysis"
             ;;
         unit-summaries)
             stage_start "push unit summaries"
+            count_json data/analysis/unit_summaries "unit summary files"
             rsync_to_remote data/analysis/unit_summaries/ data/analysis/unit_summaries/
             stage_end "push unit summaries"
             ;;
         clustering)
             stage_start "push clustering data"
+            count_json data/clustering "clustering scheme dirs"
             rsync_to_remote data/clustering/ data/clustering/
             stage_end "push clustering data"
             ;;

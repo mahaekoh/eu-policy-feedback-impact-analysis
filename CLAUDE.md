@@ -57,6 +57,7 @@ translate_attachments.py          → data/translation/non_english_attachments_t
 merge_translations.py             → updates data/scrape/initiative_details/*.json in-place
 initiative_stats.py               → data/analysis/before_after/*.json
 summarize_documents.py            → data/analysis/summaries/*.json
+merge_summaries.py                → updates data/scrape/initiative_details/*.json in-place (doc + attachment summaries)
 build_unit_summaries.py           → data/analysis/unit_summaries/*.json
 summarize_changes.py              → data/analysis/change_summaries/*.json
 merge_change_summaries.py         → updates data/scrape/initiative_details/*.json in-place
@@ -281,6 +282,14 @@ Corrupt JSON handling: if a cached initiative JSON file is corrupt (truncated wr
 | `--prev-output` | str | `None` | Previous output directory to reuse summaries from. Items with existing summaries are skipped. |
 
 Supports resume: skips initiative files whose output already exists (model is not loaded if there is no work). Within a run, per-batch result files in `_batches_pass1/group_NNNN/` and `_batches_pass2/group_NNNN/` provide crash recovery for incomplete groups.
+
+**`src/merge_summaries.py`** — Merges document and attachment summaries back into initiative detail JSON files. Matches documents by `doc_id` and attachments by `(feedback_id, attachment_id)`. Sets `summary` field on each matched document in `publications[].documents[]` and each matched attachment in `publications[].feedback[].attachments[]`.
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `summary_dir` | str (positional) | — | Directory of summary JSON files (output of `summarize_documents.py`) |
+| `details_dir` | str (positional) | — | Directory of per-initiative JSON files |
+| `--dry-run` | flag | — | Print proposed changes without modifying files |
 
 **`src/build_unit_summaries.py`** — Consolidates individual document and attachment summaries into per-initiative unified summary fields. Takes the output of `summarize_documents.py`. Adds `before_feedback_summary` (concatenation of document summaries from before feedback), `after_feedback_summary` (from after feedback), and `combined_feedback_summary` (feedback text + attachment summaries) on each middle feedback item. All concatenation joins on `\n\n`.
 
