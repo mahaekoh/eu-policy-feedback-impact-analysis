@@ -17,6 +17,7 @@ A data pipeline and web platform for exploring public consultation feedback in E
 - [Running the Full Pipeline](#running-the-full-pipeline)
 - [Pipeline Orchestration](#pipeline-orchestration)
 - [Working with the Data](#working-with-the-data)
+- [Internal Parameters Reference](#internal-parameters-reference)
 
 ## Purpose
 
@@ -448,6 +449,126 @@ All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (
 - Batch recovery directories (`_batches*`) are auto-cleaned after successful runs
 - Push/pull operations use parallel rsync (4 streams) with `--files-from` chunking for efficient large-directory transfers
 - Pull behavior varies by target: immutable LLM outputs use `--ignore-existing` (skip already-downloaded files), while targets overwritten every run (clustering, embeddings, single files) use plain rsync to keep local copies current
+
+## Internal Parameters Reference
+
+The pipeline uses many internal parameters that are not exposed as CLI arguments but affect performance, quality, and resource usage. These are documented here for tuning and debugging.
+
+### Scraping
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `PAGE_SIZE` | 10 | `scrape_eu_initiatives.py` | API page size for initiative list pagination |
+| `PAGE_WORKERS` | 10 | `scrape_eu_initiatives.py` | Parallel workers for fetching initiative list pages |
+| `FEEDBACK_PAGE_SIZE` | 500 | `scrape_eu_initiative_details.py` | API page size for feedback pagination |
+| `INITIATIVE_WORKERS` | 20 | `scrape_eu_initiative_details.py` | Thread pool size for initiative detail fetching |
+| `FEEDBACK_WORKERS` | 20 | `scrape_eu_initiative_details.py` | Thread pool size for feedback orchestration |
+| `PDF_WORKERS` | 40 | `scrape_eu_initiative_details.py` | Thread pool size for PDF/attachment text extraction |
+| `PAGE_WORKERS` | 80 | `scrape_eu_initiative_details.py` | Thread pool size for feedback page fetching |
+| `DOWNLOAD_WORKERS` | 20 | `find_short_pdf_extractions.py` | Thread pool size for PDF downloads |
+| API timeout | 30s | `scrape_eu_initiatives.py` | HTTP timeout for initiative list API calls |
+| API timeout | 60s | `scrape_eu_initiative_details.py` | HTTP timeout for initiative detail API calls |
+| Download timeout | 120s | `scrape_eu_initiative_details.py` | HTTP timeout for file downloads |
+| Retry attempts | 3 | both scrape scripts | Number of retries with exponential backoff (2, 4s) |
+| Slow request threshold | 5s | `scrape_eu_initiative_details.py` | Requests slower than this are logged as warnings |
+| `--max-age` default | 48h | `scrape_eu_initiative_details.py` | Hours before re-fetching a cached initiative (CLI arg) |
+
+### Text extraction and filtering
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `OCR_DPI` | 300 | `scrape_eu_initiative_details.py`, `ocr_short_pdfs.py` | DPI for rendering PDF pages for OCR |
+| `OCR_MIN_CHARS` | 100 | `scrape_eu_initiative_details.py` | Extracted text shorter than this triggers OCR fallback |
+| `OCR_MIN_FILE_BYTES` | 2048 | `scrape_eu_initiative_details.py` | Files smaller than this skip OCR (likely empty or corrupt) |
+| `MIN_PRINTABLE_RATIO` | 0.5 | `text_utils.py` | Texts with fewer than 50% printable characters are skipped as garbled |
+
+### LLM inference (shared across all vLLM-based scripts)
+
+| Parameter | Value | File(s) | Description |
+|---|---|---|---|
+| Default model | `unsloth/gpt-oss-120b` | all LLM scripts | Default model for translation, summarization, classification, cluster summarization |
+| Temperature | 0.15 | all LLM scripts | Sampling temperature (low for deterministic output) |
+| Token-to-char ratio | 4.8 | `inference_utils.py` | Estimated characters per token for prompt truncation (with 20% margin) |
+| Minimum trim | 200 chars | `inference_utils.py` | Minimum characters to remove per truncation step |
+
+### Summarization
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `CHUNK_SIZE` | 16,384 | `summarize_documents.py` | Max characters per text chunk before sentence-boundary splitting |
+| `COMBINE_BUDGET` | 65,536 | `summarize_documents.py` | Max characters when grouping chunk summaries for recursive combining |
+| `MAX_OUTPUT_TOKENS` | 131,072 | `summarize_documents.py` | Max output tokens per LLM call (32768 × 4) |
+| `INITIATIVE_BATCH_SIZE` | 128 | `summarize_documents.py` | Number of initiative files loaded into memory at once |
+| `--batch-size` default | 8,192 | `summarize_documents.py` | Prompts per vLLM inference batch |
+
+### Translation
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `CHUNK_SIZE` | 16,384 | `translate_attachments.py` | Max characters per translation chunk |
+| `MAX_OUTPUT_TOKENS` | 131,072 | `translate_attachments.py` | Max output tokens per LLM call |
+| `--batch-size` default | 4,096 | `translate_attachments.py` | Prompts per vLLM inference batch |
+| Merge chunk size | 5,000 | `merge_translations.py` | Chunk size for reassembling translated text from batch files |
+
+### Change summarization
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `CHUNK_SIZE` | 16,384 | `summarize_changes.py` | Max characters per chunk for large diffs |
+| `COMBINE_BUDGET` | 65,536 | `summarize_changes.py` | Max characters when combining change summaries |
+| `MAX_OUTPUT_TOKENS` | 131,072 | `summarize_changes.py` | Max output tokens per LLM call |
+| `--batch-size` default | 2,048 | `summarize_changes.py` | Prompts per vLLM inference batch |
+
+### Cluster summarization
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `CHUNK_SIZE` | 16,384 | `summarize_clusters.py` | Max characters per chunk |
+| `COMBINE_BUDGET` | 65,536 | `summarize_clusters.py` | Max characters when combining cluster summaries |
+| `MAX_OUTPUT_TOKENS` | 131,072 | `summarize_clusters.py` | Max output tokens per LLM call |
+| `--batch-size` default | 8,192 | `summarize_clusters.py` | Prompts per vLLM inference batch |
+| `--min-noise-summarize-chars` | 1,000 | `summarize_clusters.py` | Minimum text length for noise feedback to get summarized |
+
+### Classification
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `MAX_OUTPUT_TOKENS` | 32,768 | `classify_initiative_and_feedback.py` | Max output tokens (lower than other tasks — classification outputs are short) |
+| `--batch-size` default | 1,024 | `classify_initiative_and_feedback.py` | Prompts per vLLM inference batch |
+
+### Clustering
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `SILHOUETTE_SAMPLE_SIZE` | 2,000 | `cluster_all_initiatives.py` | Sample size for silhouette score (avoids O(n²) on large initiatives) |
+| Embedding batch size | 256 | `cluster_all_initiatives.py` | Batch size for SentenceTransformer encoding |
+
+### Webapp index building
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `TIMELINE_BUCKETS` | 20 | `build_webapp_index.py` | Number of time buckets for feedback timeline histograms |
+| Top topics for time series | 10 | `build_webapp_index.py` | Number of topics shown in global time series |
+| Top countries | 15 | `build_webapp_index.py` | Number of countries in global stats breakdown |
+| Top topics per country | 20 | `build_webapp_index.py` | Number of topics in per-country drill-down |
+| Topic timeline | 5 | `build_webapp_index.py` | Number of topics in per-country topic timeline |
+
+### Webapp
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `CACHE_TTL_MS` | 300,000 (5 min) | `data.ts` | In-memory cache TTL for initiative index, global stats, and country stats |
+| `ITEMS_PER_PAGE` | 50 | `initiative-list.tsx` | Initiatives per page on the index |
+| `CHUNK_SIZE` | 50 | `feedback-list.tsx` | Feedback items loaded per infinite scroll chunk |
+| `TIMELINE_BUCKETS` | 20 | `publication-section.tsx`, `initiative/[id]/page.tsx` | Time buckets for feedback sparklines |
+| `SPARKLINE_BUCKETS` | 20 | `cluster-view.tsx` | Time buckets for cluster sparklines |
+| `INITIAL_SHOW` | 5 | `cluster-node.tsx` | Feedback items shown per cluster before "show more" |
+
+### Pipeline orchestration
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `PARALLEL_JOBS` | 4 | `pipeline.sh` | Number of parallel rsync streams for push/pull operations |
 
 ## Technical Reference
 
