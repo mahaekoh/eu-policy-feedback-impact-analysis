@@ -1,6 +1,6 @@
-# EU Policy Feedback Impact Analysis — Web Application
+# EU Policy Feedback Transparency Platform — Web Application
 
-Interactive web application for browsing EU "Have Your Say" initiatives, feedback, and analysis results. Built with Next.js 16, React 19, and Tailwind CSS 4.
+Interactive web application for exploring EU "Have Your Say" public consultation feedback and how Commission documents evolve after receiving it. Browse initiatives, read AI-generated summaries, compare before- and after-feedback documents, explore clustered feedback themes, and drill into aggregate statistics by country, topic, and respondent type. Built with Next.js 16, React 19, and Tailwind CSS 4.
 
 ## Prerequisites
 

@@ -1,6 +1,6 @@
 # Technical Documentation
 
-This document covers the architecture, dependencies, data schemas, and usage of every component in the pipeline. For a research-oriented overview, see [README.md](README.md).
+This document covers the architecture, dependencies, data schemas, and usage of every component in the pipeline. For a project overview, see [README.md](README.md).
 
 ## Architecture
 

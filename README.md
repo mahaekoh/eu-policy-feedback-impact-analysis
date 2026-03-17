@@ -1,11 +1,11 @@
-# EU Policy Feedback Impact Analysis
+# EU Policy Feedback Transparency Platform
 
-A data pipeline and web platform for studying whether public consultation feedback influences EU policy documents published through the European Commission's ["Have Your Say"](https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives_en) portal.
+A data pipeline and web platform for exploring public consultation feedback in EU policy-making. It processes the full documentary record of the European Commission's ["Have Your Say"](https://ec.europa.eu/info/law/better-regulation/have-your-say/initiatives_en) portal — every initiative, every published document, and every piece of public feedback — so that citizens, researchers, and journalists can see what the public is telling the Commission and how the Commission's documents evolve after receiving that input.
 
 ## Table of Contents
 
-- [Research Question](#research-question)
-- [Methodology](#methodology)
+- [Purpose](#purpose)
+- [What It Does](#what-it-does)
 - [Data Source](#data-source)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -18,25 +18,31 @@ A data pipeline and web platform for studying whether public consultation feedba
 - [Pipeline Orchestration](#pipeline-orchestration)
 - [Working with the Data](#working-with-the-data)
 
-## Research Question
+## Purpose
 
-When the European Commission publishes a draft regulation, directive, or impact assessment and opens it for public feedback, **does that feedback measurably influence the documents the Commission publishes afterward?**
+The European Commission's "Have Your Say" portal receives thousands of public feedback submissions on proposed regulations, directives, and impact assessments. This feedback — from citizens, companies, NGOs, trade unions, academics, and public authorities — is publicly available, but is scattered across thousands of initiative pages, buried in PDF attachments, written in dozens of languages, and impractical to explore at scale.
 
-This project collects the full documentary record needed to investigate that question: every document the Commission published before and after receiving feedback, every piece of feedback submitted (including attached files in any language), and AI-generated summaries to support analysis at scale.
+This project addresses two questions:
 
-## Methodology
+1. **What is the public telling the Commission?** By extracting, translating, summarizing, and clustering feedback across all initiatives, the platform makes it possible to see the full scope of public input — who is participating, what they are saying, and how feedback is distributed across countries, sectors, and topics.
 
-The analysis follows a documentary comparison approach:
+2. **How do Commission documents evolve after public consultation?** By tracking which documents were published before and after feedback periods, summarizing both, and computing structured diffs, the platform makes it possible to examine how policy texts change in the wake of public input.
+
+## What It Does
+
+The pipeline processes the full "Have Your Say" archive:
 
 1. **Collect** all EU "Have Your Say" initiatives (3,949 initiatives)
 2. **Extract** the full text of every published document and every feedback attachment (PDFs, Word documents, RTF, ODT, plain text), with automatic retries for mislabeled file formats
 3. **Recover** text from scanned or image-based PDFs using optical character recognition (OCR)
 4. **Translate** non-English feedback attachments to English using a large language model
-5. **Identify** the temporal boundary: which documents were published *before* feedback was received, and which came *after*
-6. **Summarize** long documents and feedback attachments using AI to enable qualitative comparison at scale
-7. **Unify** per-initiative summaries into consolidated before/after/feedback summary fields for downstream analysis
+5. **Identify** the temporal structure: which documents were published before, during, and after public consultation periods
+6. **Summarize** long documents and feedback attachments using AI, making the substance of hundreds of pages accessible at a glance
+7. **Compare** before- and after-feedback documents using AI-generated change summaries, highlighting how policy texts evolved after public consultation
+8. **Cluster** feedback by topic using sentence embeddings, revealing the thematic structure of public input on each initiative
+9. **Visualize** everything through an interactive web application with search, filtering, and drill-down exploration
 
-All 2,970 initiatives with feedback are included in the before/after analysis, even when no documents were published after the feedback period.
+All 2,970 initiatives with feedback are processed, covering the full range of EU policy areas from 2016 to the present.
 
 ## Requirements
 
@@ -287,11 +293,12 @@ data/
 
 ### Web application (`webapp/`)
 
-A Next.js web application for browsing all initiatives and their feedback interactively. See [`webapp/README.md`](webapp/README.md) for detailed documentation. Features include:
+A Next.js web application for exploring EU public consultation feedback and how the Commission's documents evolve after receiving it. See [`webapp/README.md`](webapp/README.md) for detailed documentation. Features include:
 
 - **Initiative index** with full-text search, sorting (most discussed, recently discussed, newest), filtering by stage/department/topic/policy area, and pagination
 - **Initiative detail** with expandable publication sections showing documents and feedback, AI-generated summaries (document, change, before/after), and clustered feedback visualization
 - **Feedback exploration** with user type color coding, country flags, filtering by type/search/empty attachments, and infinite scroll
+- **Aggregate statistics** with country drill-downs, topic breakdowns, user type distributions, and time series
 - **Cluster view** with multiple clustering scheme support, nested cluster trees, and per-cluster statistics
 - **Optional Google sign-in** via Auth.js (the app is fully accessible without signing in)
 
@@ -353,12 +360,12 @@ Feedback comes from a range of respondent types as classified by the EU portal:
 
 ## Scope and Limitations
 
-- **Coverage**: 2,970 of 3,949 initiatives have feedback and are included in the before/after analysis (~75%). The remaining initiatives have no public feedback on the portal.
-- **Correlation, not causation**: Finding that a document changed after feedback does not prove the feedback caused the change. The Commission may have planned revisions independently.
+- **Coverage**: 2,970 of 3,949 initiatives have feedback (~75%). The remaining initiatives have no public feedback on the portal.
 - **Text extraction quality**: Most PDFs extract cleanly, but some scanned documents required OCR, which can introduce errors. Original text is preserved alongside OCR results for verification.
 - **Translation quality**: Non-English feedback was translated by a large language model. Translations are generally accurate but may miss nuance. Original text is preserved alongside translations.
+- **Summarization quality**: AI-generated summaries aim to capture the substance of documents and feedback but may omit detail or emphasis. The full extracted text is always available alongside summaries.
 - **Feedback text vs. attachments**: Some respondents submit detailed positions as attached documents rather than in the free-text comment field. The pipeline captures both, but analysis should account for this variation.
-- **Time period**: Initiatives published from June 2016 to February 2026.
+- **Time period**: Initiatives published from June 2016 to the present. The pipeline supports incremental updates as new initiatives and feedback are published.
 
 ## Working with the Data
 

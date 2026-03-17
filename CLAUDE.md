@@ -1,6 +1,6 @@
 # EU "Have Your Say" Initiative Data Pipeline
 
-This project scrapes, processes, and enriches EU Better Regulation "Have Your Say" initiative data. It investigates whether public consultation feedback influences subsequent EU policy documents through a comprehensive data pipeline (scraping, OCR, translation, LLM summarization, embedding-based clustering, classification) and a web-based visualization platform.
+This project scrapes, processes, and enriches EU Better Regulation "Have Your Say" initiative data. Through a comprehensive data pipeline (scraping, OCR, translation, LLM summarization, embedding-based clustering, classification) and a web-based visualization platform, it enables citizens, researchers, and journalists to explore what the public is telling the Commission and how the Commission's documents evolve after public consultation.
 
 ## Requirements
 
