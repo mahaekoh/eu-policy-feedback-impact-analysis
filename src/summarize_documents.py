@@ -103,18 +103,31 @@ def collect_prompts(input_dir, filenames, encoding, reasoning_effort, chunk_size
             if os.path.isfile(prev_path):
                 with open(prev_path, encoding="utf-8") as f:
                     prev = json.load(f)
+                # Carry forward document summaries by document_id
                 for list_name in ("documents_before_feedback", "documents_after_feedback"):
-                    for doc_idx, doc in enumerate(initiative.get(list_name, [])):
-                        prev_docs = prev.get(list_name, [])
-                        if doc_idx < len(prev_docs) and prev_docs[doc_idx].get("summary"):
-                            doc["summary"] = prev_docs[doc_idx]["summary"]
-                for fb_idx, fb in enumerate(initiative.get("middle_feedback", [])):
-                    prev_fbs = prev.get("middle_feedback", [])
-                    if fb_idx < len(prev_fbs):
-                        for att_idx, att in enumerate(fb.get("attachments", [])):
-                            prev_atts = prev_fbs[fb_idx].get("attachments", [])
-                            if att_idx < len(prev_atts) and prev_atts[att_idx].get("summary"):
-                                att["summary"] = prev_atts[att_idx]["summary"]
+                    prev_by_id = {
+                        d.get("document_id"): d["summary"]
+                        for d in prev.get(list_name, [])
+                        if d.get("document_id") and d.get("summary")
+                    }
+                    for doc in initiative.get(list_name, []):
+                        doc_id = doc.get("document_id")
+                        if doc_id and doc_id in prev_by_id:
+                            doc["summary"] = prev_by_id[doc_id]
+                # Carry forward attachment summaries by (feedback_id, attachment_id)
+                prev_att_summaries = {}
+                for pfb in prev.get("middle_feedback", []):
+                    fb_id = pfb.get("id")
+                    for patt in pfb.get("attachments", []):
+                        att_id = patt.get("id")
+                        if fb_id is not None and att_id is not None and patt.get("summary"):
+                            prev_att_summaries[(fb_id, att_id)] = patt["summary"]
+                for fb in initiative.get("middle_feedback", []):
+                    fb_id = fb.get("id")
+                    for att in fb.get("attachments", []):
+                        att_id = att.get("id")
+                        if fb_id is not None and att_id is not None and (fb_id, att_id) in prev_att_summaries:
+                            att["summary"] = prev_att_summaries[(fb_id, att_id)]
 
         # documents_before_feedback and documents_after_feedback
         for list_name in ("documents_before_feedback", "documents_after_feedback"):

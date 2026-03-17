@@ -57,6 +57,7 @@ MAX_DEPTH = 4
 # HDBSCAN defaults
 HDBSCAN_MIN_CLUSTER_SIZE = 5
 HDBSCAN_MIN_SAMPLES = 3
+SILHOUETTE_SAMPLE_SIZE = 2000
 
 
 def parse_args():
@@ -95,6 +96,8 @@ def parse_args():
                    help="Force CPU clustering even if cuML is available")
     p.add_argument("--max-items", type=int, default=0,
                    help="Skip initiatives with more feedback items than this (0=no limit)")
+    p.add_argument("--silhouette-sample-size", type=int, default=SILHOUETTE_SAMPLE_SIZE,
+                   help="Sample size for silhouette score (0=exact)")
     return p.parse_args()
 
 
@@ -125,6 +128,12 @@ def load_feedback(initiative):
             "combined_text": combined,
         })
     return rows
+
+
+def compute_feedback_hash(rows):
+    """Compute SHA256 hash of sorted feedback IDs for change detection."""
+    ids = sorted(str(r["feedback_id"]) for r in rows)
+    return hashlib.sha256(",".join(ids).encode("utf-8")).hexdigest()
 
 
 def _make_agglomerative(distance_threshold, linkage, use_gpu):
@@ -276,7 +285,8 @@ def cluster_recursive_hdbscan(indices, embeddings, min_cluster_size, min_samples
 
 
 def save_clustering(initiative, initiative_id, rows, assignments, embeddings,
-                    model_name, algorithm, params, output_dir):
+                    model_name, algorithm, params, output_dir, feedback_hash,
+                    silhouette_sample_size=SILHOUETTE_SAMPLE_SIZE):
     """Save a clone of the initiative JSON with clustering results."""
     result = copy.deepcopy(initiative)
 
@@ -294,17 +304,25 @@ def save_clustering(initiative, initiative_id, rows, assignments, embeddings,
     non_noise_mask = np.array([t != "-1" for t in all_top])
     top_labels = np.array(all_top)
     sil = None
+
+    # Build common kwargs for silhouette_score (sampling for large datasets)
+    sil_kwargs = {}
+    if silhouette_sample_size > 0 and len(embeddings) > silhouette_sample_size:
+        sil_kwargs = {"sample_size": silhouette_sample_size, "random_state": 42}
+
     if non_noise_mask.all():
         top_unique = set(top_labels)
         if 2 <= len(top_unique) < len(top_labels):
-            sil = float(silhouette_score(embeddings, top_labels))
+            sil = float(silhouette_score(embeddings, top_labels, **sil_kwargs))
     else:
         n_nn = int(non_noise_mask.sum())
         top_unique_nn = set(top_labels[non_noise_mask])
         if 2 <= len(top_unique_nn) < n_nn:
             sil = float(silhouette_score(
-                embeddings[non_noise_mask], top_labels[non_noise_mask]))
+                embeddings[non_noise_mask], top_labels[non_noise_mask],
+                **sil_kwargs))
 
+    result["feedback_hash"] = feedback_hash
     result["cluster_model"] = model_name
     result["cluster_algorithm"] = algorithm
     result["cluster_params"] = params
@@ -356,13 +374,17 @@ def save_cached_embeddings(cache_dir, model_name, init_id, text_hashes, embeddin
                         embeddings=embeddings)
 
 
-def cluster_initiative(initiative, init_id, rows, embeddings, args, params, use_gpu=False):
+def cluster_initiative(initiative, init_id, rows, embeddings, args, params,
+                       feedback_hash, use_gpu=False,
+                       silhouette_sample_size=SILHOUETTE_SAMPLE_SIZE):
     """Cluster a single initiative and save results. Returns (out_path, summary_str)."""
     all_indices = np.arange(len(rows))
 
     if args.algorithm == "hdbscan":
+        t_top = time.time()
         clusterer = _make_hdbscan(args.min_cluster_size, args.min_samples, len(rows), use_gpu)
         top_labels = _fit_predict(clusterer, embeddings)
+        t_top = time.time() - t_top
 
         noise_mask = top_labels == -1
         n_noise = int(noise_mask.sum())
@@ -375,6 +397,7 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params, use_
         for i in all_indices[noise_mask]:
             assignments[i] = "-1"
 
+        t_sub = time.time()
         for cl in unique_clusters:
             cl_mask = top_labels == cl
             cl_indices = all_indices[cl_mask]
@@ -392,24 +415,33 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params, use_
             else:
                 for i in cl_indices:
                     assignments[i] = label
+        t_sub = time.time() - t_sub
 
         n_final = len(set(assignments.values()) - {"-1"})
 
+        t_save = time.time()
         out_path = save_clustering(
             initiative, init_id, rows, assignments, embeddings,
-            args.model, args.algorithm, params, args.output_dir,
+            args.model, args.algorithm, params, args.output_dir, feedback_hash,
+            silhouette_sample_size=silhouette_sample_size,
         )
+        t_save = time.time() - t_save
 
         summary = (f"{len(rows)} items -> {n_top} top clusters "
-                   f"({n_noise} noise) -> {n_final} final ({sub_clustered} sub-clustered)")
+                   f"({n_noise} noise) -> {n_final} final ({sub_clustered} sub-clustered) "
+                   f"[top={t_top:.1f}s sub={t_sub:.1f}s save={t_save:.1f}s]")
 
     else:
+        t_top = time.time()
         ag = _make_agglomerative(args.distance_threshold, args.linkage, use_gpu)
         top_labels = _fit_predict(ag, embeddings)
         n_top = len(set(top_labels))
+        t_top = time.time() - t_top
 
         assignments = {}
         sub_clustered = 0
+
+        t_sub = time.time()
         for cl in sorted(set(top_labels)):
             cl_mask = top_labels == cl
             cl_indices = all_indices[cl_mask]
@@ -427,16 +459,21 @@ def cluster_initiative(initiative, init_id, rows, embeddings, args, params, use_
             else:
                 for i in cl_indices:
                     assignments[i] = label
+        t_sub = time.time() - t_sub
 
         n_final = len(set(assignments.values()))
 
+        t_save = time.time()
         out_path = save_clustering(
             initiative, init_id, rows, assignments, embeddings,
-            args.model, args.algorithm, params, args.output_dir,
+            args.model, args.algorithm, params, args.output_dir, feedback_hash,
+            silhouette_sample_size=silhouette_sample_size,
         )
+        t_save = time.time() - t_save
 
         summary = (f"{len(rows)} items -> {n_top} top clusters "
-                   f"-> {n_final} final ({sub_clustered} sub-clustered)")
+                   f"-> {n_final} final ({sub_clustered} sub-clustered) "
+                   f"[top={t_top:.1f}s sub={t_sub:.1f}s save={t_save:.1f}s]")
 
     return out_path, summary
 
@@ -498,6 +535,7 @@ def main():
     skipped = 0
     errors = 0
     cache_hits = 0
+    hash_skipped = 0
 
     model_safe = args.model.replace("/", "_")
     param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -530,6 +568,21 @@ def main():
             skipped += 1
             continue
 
+        feedback_hash = compute_feedback_hash(rows)
+
+        # Check if existing output has matching feedback hash (skip unchanged)
+        out_name = f"{init_id}_{args.algorithm}_{model_safe}_{param_str}.json"
+        existing_path = os.path.join(args.output_dir, out_name)
+        if os.path.exists(existing_path):
+            try:
+                with open(existing_path) as ef:
+                    existing = json.load(ef)
+                if existing.get("feedback_hash") == feedback_hash:
+                    hash_skipped += 1
+                    continue
+            except Exception:
+                pass  # re-cluster if output is corrupt
+
         texts = [r["combined_text"] for r in rows]
         text_hashes = hash_texts(texts)
 
@@ -539,7 +592,7 @@ def main():
             cached_emb = load_cached_embeddings(cache_dir, args.model, init_id, text_hashes)
 
         wi_idx = len(work_items)
-        work_items.append((init_id, initiative, rows, text_hashes, cached_emb))
+        work_items.append((init_id, initiative, rows, text_hashes, cached_emb, feedback_hash))
 
         if cached_emb is not None:
             cache_hits += 1
@@ -550,7 +603,8 @@ def main():
 
     n_to_encode = len(texts_to_encode)
     print(f"  {len(work_items)} initiatives to process, {n_to_encode} texts to encode "
-          f"({cache_hits} cached, {skipped} skipped, {errors} errors) [{time.time() - t_load:.1f}s]")
+          f"({cache_hits} cached, {skipped} skipped, {hash_skipped} unchanged, {errors} errors) "
+          f"[{time.time() - t_load:.1f}s]")
 
     if not work_items:
         print("Nothing to do.")
@@ -592,7 +646,7 @@ def main():
     # (so they survive if clustering crashes)
     if cache_dir and n_to_encode > 0:
         saved = 0
-        for i, (init_id, _initiative, _rows, text_hashes, cached_emb) in enumerate(work_items):
+        for i, (init_id, _initiative, _rows, text_hashes, cached_emb, _feedback_hash) in enumerate(work_items):
             if cached_emb is None:
                 offset, count = encode_map[i]
                 embeddings = encoded_embeddings[offset:offset + count]
@@ -605,7 +659,7 @@ def main():
     t_clust_total = time.time()
     processed = 0
 
-    for i, (init_id, initiative, rows, text_hashes, cached_emb) in enumerate(work_items):
+    for i, (init_id, initiative, rows, text_hashes, cached_emb, feedback_hash) in enumerate(work_items):
         if cached_emb is not None:
             embeddings = cached_emb
         else:
@@ -614,7 +668,8 @@ def main():
 
         t_clust = time.time()
         out_path, summary = cluster_initiative(
-            initiative, init_id, rows, embeddings, args, params, use_gpu,
+            initiative, init_id, rows, embeddings, args, params, feedback_hash, use_gpu,
+            silhouette_sample_size=args.silhouette_sample_size,
         )
         t_clust = time.time() - t_clust
 
@@ -624,8 +679,8 @@ def main():
     t_clust_total = time.time() - t_clust_total
     t_total = t_enc + t_clust_total
     print(f"\nDone in {t_total:.1f}s (encode={t_enc:.1f}s, cluster={t_clust_total:.1f}s). "
-          f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}, "
-          f"Cache hits: {cache_hits}")
+          f"Processed: {processed}, Skipped: {skipped}, Unchanged: {hash_skipped}, "
+          f"Errors: {errors}, Cache hits: {cache_hits}")
 
 
 if __name__ == "__main__":

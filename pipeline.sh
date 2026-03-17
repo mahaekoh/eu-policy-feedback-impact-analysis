@@ -72,7 +72,7 @@ run_remote() {
     # shellcheck disable=SC2029
     local remote_pid
     remote_pid=$($SSH_CMD "cd ${REMOTE_DIR} && mkdir -p logs \
-        && nohup bash -c '${remote_cmd} > ${log_file} 2>&1; echo \$? > ${status_file}' \
+        && nohup bash -c '{ ${remote_cmd}; } > ${log_file} 2>&1; echo \$? > ${status_file}' \
            </dev/null >/dev/null 2>&1 & echo \$!")
     echo "Remote PID: ${remote_pid}, log: ${REMOTE_DIR}/${log_file}"
 
@@ -268,10 +268,14 @@ do_setup() {
     stage_start "local setup"
     echo "Installing Python dependencies (local)..."
     uv sync
-    echo ""
-    echo "Logging in to Hugging Face (for model downloads)..."
-    echo "Get your token at https://huggingface.co/settings/tokens"
-    huggingface-cli login
+    if huggingface-cli whoami &>/dev/null; then
+        echo "Hugging Face token already configured, skipping login."
+    else
+        echo ""
+        echo "Logging in to Hugging Face (for model downloads)..."
+        echo "Get your token at https://huggingface.co/settings/tokens"
+        huggingface-cli login
+    fi
     stage_end "local setup"
 }
 
@@ -285,18 +289,25 @@ do_setup_remote() {
     echo "Installing Python dependencies (remote)..."
     # shellcheck disable=SC2029
     $SSH_CMD "cd ${REMOTE_DIR} && $PYTHON -m pip install \
+        --extra-index-url https://pypi.nvidia.com \
         vllm openai-harmony \
         easyocr \
         sentence-transformers scikit-learn hdbscan \
+        cuml-cu12 \
         torch numpy \
         huggingface-hub"
 
     # Interactive HF login on remote (needs a TTY)
-    echo ""
-    echo "Logging in to Hugging Face on remote..."
-    echo "Get your token at https://huggingface.co/settings/tokens"
-    ssh -t -i "${SSH_KEY}" "${REMOTE_HOST}" \
-        "cd ${REMOTE_DIR} && huggingface-cli login"
+    # shellcheck disable=SC2029
+    if $SSH_CMD "huggingface-cli whoami" &>/dev/null; then
+        echo "Hugging Face token already configured on remote, skipping login."
+    else
+        echo ""
+        echo "Logging in to Hugging Face on remote..."
+        echo "Get your token at https://huggingface.co/settings/tokens"
+        ssh -t -i "${SSH_KEY}" "${REMOTE_HOST}" \
+            "cd ${REMOTE_DIR} && huggingface-cli login"
+    fi
 
     stage_end "remote setup"
 }
@@ -413,6 +424,11 @@ do_push() {
     local target="${1:?Usage: pipeline.sh push <target>}"
     shift
     case "$target" in
+        initiative-details)
+            stage_start "push initiative details"
+            rsync_to_remote data/scrape/initiative_details/ data/scrape/initiative_details/
+            stage_end "push initiative details"
+            ;;
         ocr)
             stage_start "push ocr data"
             rsync_to_remote data/ocr/ data/ocr/
@@ -440,6 +456,7 @@ do_push() {
             stage_end "push clustering data"
             ;;
         all)
+            do_push initiative-details
             do_push ocr
             do_push translation
             do_push analysis
@@ -448,7 +465,7 @@ do_push() {
             ;;
         *)
             echo "ERROR: Unknown push target: $target"
-            echo "Valid targets: ocr, translation, analysis, unit-summaries, clustering, all"
+            echo "Valid targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering, all"
             exit 1
             ;;
     esac
@@ -458,6 +475,15 @@ do_pull() {
     local target="${1:?Usage: pipeline.sh pull <target>}"
     shift
     case "$target" in
+        initiative-details)
+            stage_start "pull initiative details"
+            # Overwrite local: remote has authoritative copy with all merges applied
+            mkdir -p data/scrape/initiative_details
+            rsync "${RSYNC_OPTS[@]}" \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/scrape/initiative_details/" \
+                data/scrape/initiative_details/
+            stage_end "pull initiative details"
+            ;;
         ocr)
             stage_start "pull OCR results"
             rsync_from_remote data/ocr/short_pdf_report_ocr.json \
@@ -508,6 +534,13 @@ do_pull() {
             rsync_from_remote_exclude data/analysis/change_summaries/ data/analysis/change_summaries/ '_batches*'
             stage_end "pull change summaries"
             ;;
+        webapp)
+            stage_start "pull webapp data"
+            mkdir -p data/webapp
+            rsync "${RSYNC_OPTS[@]}" \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/webapp/" data/webapp/
+            stage_end "pull webapp data"
+            ;;
         logs)
             stage_start "pull remote logs"
             mkdir -p data/logs
@@ -516,17 +549,20 @@ do_pull() {
             stage_end "pull remote logs"
             ;;
         all)
+            do_pull initiative-details
             do_pull ocr
             do_pull translation
             do_pull summaries
             do_pull classification
             do_pull clustering
+            do_pull embeddings
             do_pull cluster-summaries
             do_pull change-summaries
+            do_pull webapp
             ;;
         *)
             echo "ERROR: Unknown pull target: $target"
-            echo "Valid targets: ocr, translation, summaries, classification, clustering, embeddings, cluster-summaries, change-summaries, logs, all"
+            echo "Valid targets: initiative-details, ocr, translation, summaries, classification, clustering, embeddings, cluster-summaries, change-summaries, webapp, logs, all"
             exit 1
             ;;
     esac
@@ -573,6 +609,7 @@ do_remote() {
             fi
             # cuML needs RAPIDS native libraries on LD_LIBRARY_PATH; unbuffered for live log output
             local rapids_ld='export PYTHONUNBUFFERED=1; export LD_LIBRARY_PATH=$(python3 -c "import site,os,glob;ps=[os.path.expanduser(\"~/.local/lib/python3.10/site-packages\")];print(\":\".join(d for p in ps for d in glob.glob(os.path.join(p,\"lib*/lib64\"))))" 2>/dev/null):$LD_LIBRARY_PATH;'
+            local pids=()
             for scheme in $CLUSTER_SCHEMES; do
                 parse_scheme "$scheme"
                 local out_dir
@@ -584,8 +621,17 @@ do_remote() {
                         --output-dir "$out_dir" \
                         --embeddings-cache-dir data/embeddings \
                         "${SCHEME_FLAGS[@]}" \
-                        "$@"
+                        "$@" &
+                pids+=($!)
             done
+            local failed=0
+            for pid in "${pids[@]}"; do
+                wait "$pid" || failed=$((failed + 1))
+            done
+            if [ "$failed" -gt 0 ]; then
+                echo "ERROR: $failed clustering scheme(s) failed"
+                return 1
+            fi
             ;;
         summarize-clusters)
             if [ -z "$CLUSTER_SCHEMES" ]; then
@@ -613,9 +659,58 @@ do_remote() {
                     data/analysis/unit_summaries/ \
                     -o data/analysis/change_summaries/ "$@"
             ;;
+        # ── Composite pipeline steps (chain find/merge with GPU steps on remote) ──
+        ocr-pipeline)
+            run_remote "ocr-pipeline" \
+                "$PYTHON src/find_short_pdf_extractions.py data/scrape/initiative_details -o data/ocr/" \
+                "&& $PYTHON src/ocr_short_pdfs.py data/ocr/" \
+                "&& $PYTHON src/merge_ocr_results.py data/ocr/short_pdf_report_ocr.json data/scrape/initiative_details"
+            ;;
+        translate-pipeline)
+            REMOTE_BATCH_DIRS="data/translation/non_english_attachments_translated_batches"
+            run_remote "translate-pipeline" \
+                "$PYTHON src/find_non_english_feedback_attachments.py data/scrape/initiative_details -o data/translation/non_english_attachments.json" \
+                "&& $PYTHON src/translate_attachments.py data/translation/non_english_attachments.json -o data/translation/non_english_attachments_translated.json" \
+                "&& $PYTHON src/merge_translations.py data/translation/non_english_attachments_translated.json data/scrape/initiative_details"
+            ;;
+        summarize-pipeline)
+            REMOTE_BATCH_DIRS="data/analysis/summaries/_batches_pass1 data/analysis/summaries/_batches_pass2"
+            run_remote "summarize-pipeline" \
+                "$PYTHON src/initiative_stats.py data/scrape/initiative_details -o data/analysis/before_after/" \
+                "&& $PYTHON src/summarize_documents.py data/analysis/before_after/ -o data/analysis/summaries/ --prev-output data/analysis/summaries" \
+                "&& $PYTHON src/build_unit_summaries.py data/analysis/summaries/ -o data/analysis/unit_summaries/"
+            ;;
+        cluster-summarize-pipeline)
+            if [ -z "$CLUSTER_SCHEMES" ]; then
+                echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+                exit 1
+            fi
+            for scheme in $CLUSTER_SCHEMES; do
+                local cluster_dir="data/clustering/${scheme}"
+                local summary_dir="data/cluster_summaries/${scheme}"
+                REMOTE_BATCH_DIRS="data/cluster_summaries/${scheme}/_batches_p1_* data/cluster_summaries/${scheme}/_batches_p2_* data/cluster_summaries/${scheme}/_batches_p3_*"
+                run_remote "cluster-summarize ($scheme)" \
+                    "$PYTHON src/summarize_clusters.py $cluster_dir -o $summary_dir" \
+                    "&& $PYTHON src/merge_cluster_feedback_summaries.py $summary_dir data/scrape/initiative_details"
+            done
+            ;;
+        change-summarize-pipeline)
+            REMOTE_BATCH_DIRS="data/analysis/change_summaries/_batches data/analysis/change_summaries/_batches_combine"
+            run_remote "change-summarize-pipeline" \
+                "$PYTHON src/summarize_changes.py data/analysis/unit_summaries/ -o data/analysis/change_summaries/" \
+                "&& $PYTHON src/merge_change_summaries.py data/analysis/change_summaries data/scrape/initiative_details"
+            ;;
+        build-index)
+            run_remote "build-index" \
+                $PYTHON src/build_webapp_index.py \
+                    data/scrape/initiative_details \
+                    -o data/webapp/initiative_index.json "$@"
+            ;;
         *)
             echo "ERROR: Unknown remote step: $step"
-            echo "Valid steps: ocr, translate, summarize, classify, summarize-clusters, summarize-changes"
+            echo "Valid steps: ocr, translate, summarize, classify, cluster, summarize-clusters, summarize-changes,"
+            echo "             ocr-pipeline, translate-pipeline, summarize-pipeline,"
+            echo "             cluster-summarize-pipeline, change-summarize-pipeline, build-index"
             exit 1
             ;;
     esac
@@ -624,56 +719,42 @@ do_remote() {
 # ── Full pipeline ────────────────────────────────────────────────────────────
 
 do_full() {
-    # Scrape
+    # Phase 1: Local scraping
     do_scrape "$@"
 
-    # OCR pipeline: find short extractions → remote OCR → merge back
-    do_find_short_pdfs "$@"
+    # Phase 2: Deploy code + push initiative data to remote
     do_deploy
-    do_push ocr
-    do_remote ocr "$@"
-    do_pull ocr
-    do_merge_ocr "$@"
+    do_push initiative-details
 
-    # Translation pipeline: find non-English (after OCR merge) → remote translate → merge back
-    do_find_nonenglish "$@"
-    do_push translation
-    do_remote translate "$@"
-    do_pull translation
-    do_merge_translations "$@"
+    # Phase 3: OCR pipeline (find + GPU OCR + merge, all on remote)
+    do_remote ocr-pipeline
 
-    # Analysis
-    do_analyze "$@"
-    do_push analysis
+    # Phase 4: Translation pipeline (find + GPU translate + merge, all on remote)
+    do_remote translate-pipeline
 
-    # Remote summarization -> pull
-    do_remote summarize "$@"
-    do_pull summaries
+    # Phase 5: Summarization pipeline (analyze + GPU summarize + build summaries, all on remote)
+    do_remote summarize-pipeline
 
-    # Build unit summaries
-    do_build_summaries "$@"
+    # Phase 6: Clustering (on remote, uses unit_summaries produced in phase 5)
+    do_remote cluster
 
-    # Remote clustering -> pull
-    do_push unit-summaries
-    do_remote cluster "$@"
+    # Phase 7: Cluster summarization + merge (on remote, per scheme)
+    do_remote cluster-summarize-pipeline
+
+    # Phase 8: Change summarization + merge (on remote)
+    do_remote change-summarize-pipeline
+
+    # Phase 9: Build webapp index (on remote, after all merges)
+    do_remote build-index
+
+    # Phase 10: Pull all results back
+    do_pull initiative-details
     do_pull clustering
     do_pull embeddings
-
-    # Build webapp index from clustering results
-    do_build_index "$@"
-
-    # Push for remote cluster summarization
-    do_push clustering
-
-    # Remote cluster summarization -> pull -> merge into initiative_details
-    do_remote summarize-clusters "$@"
+    do_pull webapp
+    do_pull summaries
     do_pull cluster-summaries
-    do_merge_cluster_feedback_summaries "$@"
-
-    # Remote change summarization -> pull -> merge into initiative_details
-    do_remote summarize-changes "$@"
     do_pull change-summaries
-    do_merge_change_summaries "$@"
 
     echo ""
     echo "============================================================"
@@ -728,49 +809,60 @@ do_list() {
     cat <<'EOF'
 Full pipeline (./pipeline.sh full):
 
-   #  Command                   Description
-   1  scrape                    Scrape initiatives + details
-   2  find-short-pdfs           Find short PDF extractions for OCR
-   3  deploy                    Rsync code to remote
-   4  push ocr                  Push OCR input to remote
-   5  remote ocr                Run GPU OCR on remote
-   6  pull ocr                  Pull OCR results back
-   7  merge-ocr                 Merge OCR results into initiative_details
-   8  find-nonenglish           Find non-English feedback attachments
-   9  push translation          Push translation input to remote
-  10  remote translate          Run GPU translation on remote
-  11  pull translation          Pull translation results back
-  12  merge-translations        Merge translations into initiative_details
-  13  analyze                   Run initiative_stats (before/after analysis)
-  14  push analysis             Push before-after analysis to remote
-  15  remote summarize          Run GPU document summarization on remote
-  16  pull summaries            Pull document summaries back
-  17  build-summaries           Build unit summaries from document summaries
-  18  push unit-summaries       Push unit summaries to remote
-  19  remote cluster            Run GPU clustering on remote (multi-GPU)
-  20  pull clustering           Pull clustering results back
-  21  build-index               Pre-compute webapp initiative index + stripped details
-  22  push clustering           Push clustering data to remote
-  23  remote summarize-clusters Run GPU cluster summarization on remote
-  24  pull cluster-summaries    Pull cluster summaries back
-  25  merge-cluster-feedback-summaries  Merge feedback summaries into initiative_details
-  26  remote summarize-changes  Run GPU change summarization on remote
-  27  pull change-summaries     Pull change summaries back
-  28  merge-change-summaries    Merge change summaries into initiative_details
+   #  Command                              Description
+   1  scrape                               Scrape initiatives + details (local)
+   2  deploy                               Rsync code to remote
+   3  push initiative-details              Push initiative data to remote
+   4  remote ocr-pipeline                  Find short PDFs + GPU OCR + merge (remote)
+   5  remote translate-pipeline            Find non-English + GPU translate + merge (remote)
+   6  remote summarize-pipeline            Analyze + GPU summarize + build summaries (remote)
+   7  remote cluster                       GPU clustering (remote, multi-GPU)
+   8  remote cluster-summarize-pipeline    GPU cluster summarize + merge (remote, per scheme)
+   9  remote change-summarize-pipeline     GPU change summarize + merge (remote)
+  10  remote build-index                   Build webapp index (remote)
+  11  pull initiative-details              Pull initiative data with all merges applied
+  12  pull clustering                      Pull clustering results
+  13  pull embeddings                      Pull embeddings cache
+  14  pull webapp                          Pull webapp data
+  15  pull summaries                       Pull document summaries
+  16  pull cluster-summaries               Pull cluster summaries
+  17  pull change-summaries                Pull change summaries
 
 Setup (run once before first pipeline run):
   setup                    Install local Python deps (uv sync) + Hugging Face login
   setup-remote             Deploy code + install remote Python deps (pip) + Hugging Face login
 
-Other commands:
-  cluster                  Cluster all initiatives locally (per configured schemes)
+Individual stages (for ad-hoc use):
+  scrape                   Scrape initiatives + details (local)
+  find-short-pdfs          Find short PDF extractions (local)
+  find-nonenglish          Find non-English feedback attachments (local)
+  merge-ocr                Merge OCR results into initiative_details (local)
+  merge-translations       Merge translations into initiative_details (local)
+  analyze                  Run initiative_stats (local)
+  build-summaries          Build unit summaries (local)
+  build-index              Build webapp index (local)
+  cluster                  Cluster all initiatives locally
+  merge-change-summaries   Merge change summaries (local)
+  merge-cluster-feedback-summaries  Merge cluster feedback summaries (local)
+  remote ocr               Run GPU OCR on remote
+  remote translate         Run GPU translation on remote
+  remote summarize         Run GPU document summarization on remote
   remote classify          Run GPU classification on remote
-  pull classification      Pull classification results back
-  clean-batches <target>   Delete batch files on remote (summaries, cluster-summaries,
-                           change-summaries, translation, all)
-  pull logs               Pull all remote logs to data/logs/
+  remote cluster           Run GPU clustering on remote
+  remote summarize-clusters  Run GPU cluster summarization on remote
+  remote summarize-changes   Run GPU change summarization on remote
+
+Other commands:
+  deploy                   Rsync code to remote
+  push <target>            Push data to remote
+  pull <target>            Pull data from remote
+  clean-batches <target>   Delete batch files on remote
   logs                     List recent remote logs
-  logs tail [step]         Tail most recent log (optionally filtered by step name)
+  logs tail [step]         Tail most recent log
+
+Push targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering, all
+Pull targets: initiative-details, ocr, translation, summaries, classification, clustering,
+              embeddings, cluster-summaries, change-summaries, webapp, logs, all
 
 Push/pull use parallel rsync (4 streams). Extra args are passed through to Python scripts.
 EOF

@@ -951,6 +951,7 @@ def main(out_dir: str = None, cache_dir: str = None, max_age_hours: float = 48):
     write_lock = threading.Lock()
     done_count = len(skip_ids)
     error_count = 0
+    changed_ids = set()
 
     # Separate pools to avoid deadlock with initiative pool
     fb_executor = ThreadPoolExecutor(max_workers=FEEDBACK_WORKERS)
@@ -983,6 +984,7 @@ def main(out_dir: str = None, cache_dir: str = None, max_age_hours: float = 48):
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(record, f, ensure_ascii=False, indent=2)
                 done_count += 1
+                changed_ids.add(init_id)
                 dc = done_count
             print(
                 f"[{dc}/{total}] {tag} ID {init_id}: "
@@ -1018,6 +1020,13 @@ def main(out_dir: str = None, cache_dir: str = None, max_age_hours: float = 48):
         fb_executor.shutdown(wait=False)
         pdf_executor.shutdown(wait=False)
         page_executor.shutdown(wait=False)
+
+    # Write manifest of changed initiative IDs
+    manifest_path = out_path.parent / "changed_initiatives.txt"
+    with open(manifest_path, "w") as f:
+        for cid in sorted(changed_ids, key=int):
+            f.write(f"{cid}\n")
+    print(f"Changed initiatives manifest: {manifest_path} ({len(changed_ids)} IDs)")
 
     # --- Retry extraction errors in existing files ---
     _retry_extraction_errors(out_path)
