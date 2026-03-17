@@ -47,6 +47,14 @@ All 2,970 initiatives with feedback are included in the before/after analysis, e
 | Node.js | >= 18 | For the webapp only |
 | NVIDIA GPU | H100 recommended | For OCR, translation, summarization, clustering, classification. Not needed for scraping, merging, or the webapp. |
 | macOS `textutil` | (system) | DOC text extraction (macOS only; optional) |
+| Hugging Face account | — | Required for model downloads. Get a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). |
+
+### Python dependencies (`pyproject.toml`)
+
+Dependencies are split into two groups in `pyproject.toml`:
+
+- **Base** (`uv sync`): pymupdf, pymupdf4llm, pypandoc, pypandoc_binary, docx2md, huggingface-hub — for local scraping, merging, text extraction, and index building
+- **GPU optional** (`uv sync --extra gpu` or `pip install`): vllm, openai-harmony, easyocr, sentence-transformers, scikit-learn, hdbscan, torch, numpy — for the remote GPU host
 
 ### Key Python dependencies
 
@@ -64,10 +72,20 @@ All 2,970 initiatives with feedback are included in the before/after analysis, e
 
 ## Quick Start
 
-### 1. Install Python dependencies
+### 1. Install dependencies and log in to Hugging Face
 
 ```bash
-uv sync
+# Install local Python dependencies (scraping, merging, text extraction)
+./pipeline.sh setup
+
+# Or manually: uv sync && huggingface-cli login
+```
+
+For the remote GPU host (OCR, translation, summarization, clustering):
+
+```bash
+# Deploy code, install GPU deps (pip), log in to Hugging Face on remote
+./pipeline.sh setup-remote
 ```
 
 ### 2. Scrape initiatives (local, no GPU needed)
@@ -395,6 +413,8 @@ All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (
 ### Commands
 
 ```bash
+./pipeline.sh setup                    # Install local Python deps (uv sync) + Hugging Face login
+./pipeline.sh setup-remote             # Deploy code + install remote GPU deps (pip) + HF login
 ./pipeline.sh list                     # Show all 28 stages
 ./pipeline.sh full                     # Run entire pipeline end-to-end
 ./pipeline.sh <stage>                  # Run a single stage
@@ -420,6 +440,7 @@ All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (
 - Exit code is read from a `.exit` status file when the job completes
 - Batch recovery directories (`_batches*`) are auto-cleaned after successful runs
 - Push/pull operations use parallel rsync (4 streams) with `--files-from` chunking for efficient large-directory transfers
+- Pull behavior varies by target: immutable LLM outputs use `--ignore-existing` (skip already-downloaded files), while targets overwritten every run (clustering, embeddings, single files) use plain rsync to keep local copies current
 
 ## Technical Reference
 

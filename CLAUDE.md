@@ -67,9 +67,16 @@ merge_cluster_feedback_summaries.py → updates data/scrape/initiative_details/*
 build_webapp_index.py             → data/webapp/initiative_index.json + global_stats.json + country_stats.json + initiative_details/
 ```
 
+## Python dependencies (`pyproject.toml`)
+
+Dependencies are split into two groups:
+
+- **Base** (`uv sync`): pymupdf, pymupdf4llm, pypandoc, pypandoc_binary, docx2md, huggingface-hub. Needed for local scraping, merging, text extraction, and index building.
+- **GPU optional** (`uv sync --extra gpu` or `pip install`): vllm, openai-harmony, easyocr, sentence-transformers, scikit-learn, hdbscan, torch, numpy. Needed on the remote GPU host for OCR, translation, summarization, clustering, and classification.
+
 ## Pipeline orchestration
 
-`pipeline.sh` orchestrates the full pipeline. Copy `pipeline.conf.example` to `pipeline.conf` and fill in remote host details.
+`pipeline.sh` orchestrates the full pipeline. Copy `pipeline.conf.example` to `pipeline.conf` and fill in remote host details. Run `./pipeline.sh setup` and `./pipeline.sh setup-remote` once before the first pipeline run to install dependencies and log in to Hugging Face.
 
 ### Configuration (`pipeline.conf`)
 
@@ -86,6 +93,8 @@ Required variables:
 ### Commands
 
 ```
+./pipeline.sh setup                    # install local Python deps (uv sync) + Hugging Face login
+./pipeline.sh setup-remote             # deploy code + install remote GPU deps (pip) + HF login
 ./pipeline.sh list                     # show all stages
 ./pipeline.sh <stage> [extra-args...]  # run a single stage
 ./pipeline.sh full                     # full pipeline (all 28 stages in order)
@@ -145,7 +154,7 @@ Required variables:
 
 Remote commands run via `nohup` with stdout/stderr piped to log files under `logs/` on the remote host. This ensures long-running GPU jobs survive SSH disconnects. The local terminal tails the log in real-time and reads the exit code from a `.exit` status file when the job completes. Batch directories (`_batches*`) are auto-cleaned on successful completion.
 
-Push/pull operations use parallel rsync (4 streams by default) with `--files-from` chunking for directory transfers. Pull operations detect missing files locally and only transfer new ones.
+Push/pull operations use parallel rsync (4 streams by default) with `--files-from` chunking for directory transfers. Pull behavior varies by target: immutable LLM output directories (summaries, classification, cluster-summaries, change-summaries) use `--ignore-existing` to skip already-downloaded files. Targets that are overwritten on every run (clustering, embeddings, single files like OCR/translation reports) use plain rsync without `--ignore-existing` to ensure local copies stay current.
 
 ## Scripts
 
@@ -167,6 +176,8 @@ Push/pull operations use parallel rsync (4 streams by default) with `--files-fro
 | `--max-age` | float | `48` | Max age in hours before re-fetching a cached initiative. Set to 0 to force update all. |
 
 Incremental update behavior: initiatives cached more recently than `max_age` hours are skipped; stale initiatives are re-fetched from the API with a merge strategy that preserves derived fields (`extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `summary`, `cluster_feedback_summary`, etc.) on documents and attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. Terminal stages (SUSPENDED, ABANDONED) and ADOPTION_WORKFLOW initiatives with all-closed feedback are never re-checked regardless of age. Top-level derived fields (e.g. `change_summary`, `diff`, `cluster_policy_summary`, `cluster_summaries`) are also preserved from the old record when re-scraping.
+
+Corrupt JSON handling: if a cached initiative JSON file is corrupt (truncated write, encoding error), the scraper logs a warning and re-fetches the initiative from scratch instead of crashing. This handles files left in a broken state by interrupted previous runs.
 
 ### Analysis / reporting
 
