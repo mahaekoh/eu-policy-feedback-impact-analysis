@@ -173,13 +173,15 @@ Server-side data loading with a **5-minute in-memory cache** (`CACHE_TTL_MS = 30
 
 ### Data paths (relative to `webapp/`)
 
-| Path | Used by |
-|---|---|
-| `../data/webapp/initiative_index.json` | `getInitiativeIndex()` |
-| `../data/webapp/global_stats.json` | `getGlobalStats()` |
-| `../data/webapp/country_stats.json` | `getCountryStats()` |
-| `../data/webapp/initiative_details/*.json` | `getInitiativeDetail()`, `getClusterData()` |
-| `../data/clustering/<scheme>/*.json` | `getClusterData()` |
+| Path | Produced by | Used by | Overwrite behavior |
+|---|---|---|---|
+| `../data/webapp/initiative_index.json` | `build_webapp_index.py` | `getInitiativeIndex()` | Regenerated every run |
+| `../data/webapp/global_stats.json` | `build_webapp_index.py` | `getGlobalStats()` | Regenerated every run |
+| `../data/webapp/country_stats.json` | `build_webapp_index.py` | `getCountryStats()` | Regenerated every run |
+| `../data/webapp/initiative_details/*.json` | `build_webapp_index.py` | `getInitiativeDetail()`, `getClusterData()` | Regenerated every run. Stripped copies with `extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation` removed from feedback attachments. Cluster summaries (`cluster_policy_summary`, `cluster_summaries`) are present if `merge_cluster_feedback_summaries.py` was run before index building. |
+| `../data/clustering/<scheme>/*.json` | `cluster_all_initiatives.py` | `getClusterData()` | Overwritten every clustering run (pipeline.sh does not pass `--skip-existing`). Filenames encode algorithm, model, and parameters: `{id}_{algo}_{model}_{params}.json`. |
+
+All webapp data files are populated by running `build_webapp_index.py` (see the [root README](../README.md) for full pipeline details). To update the webapp after a pipeline re-run, re-run `build_webapp_index.py` and restart the dev server (or wait for the 5-minute cache to expire).
 
 ## TypeScript Interfaces (`src/lib/types.ts`)
 

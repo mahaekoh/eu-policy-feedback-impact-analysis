@@ -152,49 +152,124 @@ All data comes from the European Commission's [Better Regulation](https://ec.eur
 
 ## What the Pipeline Produces
 
-### Master initiative list (`data/scrape/eu_initiatives.csv`)
+### Pipeline step reference
 
-A CSV file with all 3,949 initiatives, including their ID, title, type of act, feedback dates, policy topics, and URL.
+Each pipeline step reads from the previous step's output and writes its own. The table below shows every step, its inputs, outputs, resume behavior, and whether output files are overwritten on re-runs.
 
-### Per-initiative detail files (`data/scrape/initiative_details/*.json`)
+| Step | Script | Input | Output | Resume behavior | Overwritten on re-run? |
+|---|---|---|---|---|---|
+| **Scrape list** | `scrape_eu_initiatives.py` | EU Better Regulation API | `data/scrape/eu_initiatives.csv` | None — always re-fetches all pages | Yes, regenerated every run |
+|  |  |  | `data/scrape/eu_initiatives_raw.json` |  | Yes |
+| **Scrape details** | `scrape_eu_initiative_details.py` | API + CSV list | `data/scrape/initiative_details/{id}.json` | Skips initiatives cached within `--max-age` hours (default 48). Terminal stages (SUSPENDED, ABANDONED) and closed ADOPTION_WORKFLOW initiatives are never re-checked. Corrupt JSON files are detected and re-fetched from scratch. | Stale files are re-fetched with a **merge strategy** that preserves derived fields (`summary`, `extracted_text_without_ocr`, `extracted_text_before_translation`, `cluster_feedback_summary`, `change_summary`, `diff`, `cluster_policy_summary`, `cluster_summaries`) on documents/attachments whose source material (pages, size_bytes, document_id, feedback_text) hasn't changed. |
+| **Find short PDFs** | `find_short_pdf_extractions.py` | `data/scrape/initiative_details/` | `data/ocr/short_pdf_report.json` | None | Yes |
+|  |  |  | `data/ocr/pdfs/{filename}` |  | Yes |
+| **OCR** | `ocr_short_pdfs.py` | `data/ocr/short_pdf_report.json` + `data/ocr/pdfs/` | `data/ocr/short_pdf_report_ocr.json` | None | Yes, single file regenerated |
+| **Merge OCR** | `merge_ocr_results.py` | OCR report + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None — applies all records every run | In-place mutation: sets `extracted_text` and preserves original as `extracted_text_without_ocr` |
+| **Find non-English** | `find_non_english_feedback_attachments.py` | `data/scrape/initiative_details/` | `data/translation/non_english_attachments.json` | None | Yes |
+| **Translate** | `translate_attachments.py` | `data/translation/non_english_attachments.json` | `data/translation/non_english_attachments_translated.json` | Per-batch file resume: existing batch files in `_batches/` are loaded instead of re-running inference. | Yes, combined output file regenerated. Batch files are append-only. |
+| **Merge translations** | `merge_translations.py` | Translation output + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None | In-place mutation: sets `extracted_text` and preserves original as `extracted_text_before_translation`. Skips "NO TRANSLATION NEEDED" records. |
+| **Analyze** | `initiative_stats.py` | `data/scrape/initiative_details/` | `data/analysis/before_after/{id}.json` | None — always regenerates all files | Yes |
+| **Summarize docs** | `summarize_documents.py` | `data/analysis/before_after/` | `data/analysis/summaries/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Item-level**: with `--prev-output`, reuses summaries from a previous output directory for items with unchanged text. **Batch-level**: per-batch files in `_batches_pass1/` and `_batches_pass2/` provide crash recovery within a run. Model is not loaded if there is no work. | No — files are immutable once written. To regenerate, delete the output file. |
+| **Build unit summaries** | `build_unit_summaries.py` | `data/analysis/summaries/` | `data/analysis/unit_summaries/{id}.json` | None — always regenerates all files | Yes |
+| **Summarize changes** | `summarize_changes.py` | `data/analysis/unit_summaries/` | `data/analysis/change_summaries/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Batch-level**: per-batch files in `_batches/` and `_batches_combine/` provide crash recovery. Model is not loaded if there is no work. | No — files are immutable once written. To regenerate, delete the output file. |
+| **Merge change summaries** | `merge_change_summaries.py` | Change summaries + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None | In-place mutation: sets `change_summary` and `diff` at initiative top level. |
+| **Cluster feedback** | `cluster_all_initiatives.py` | `data/analysis/unit_summaries/` | `data/clustering/{scheme}/{id}_{algo}_{model}_{params}.json` | Optional `--skip-existing` flag skips initiatives with existing output. **Not passed by pipeline.sh** — all files are regenerated every run. | **Yes — files are overwritten every run** (unless `--skip-existing` is used). |
+|  |  |  | `data/embeddings/{model}/{id}.npz` | Hash-validated: cached embeddings are reused only if text hashes match. Stale caches are ignored (cache miss, re-encoded). | Yes — overwritten when initiative data changes. |
+| **Classify** | `classify_initiative_and_feedback.py` | `data/analysis/unit_summaries/` | `data/classification/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Batch-level**: per-batch files provide crash recovery. Model is not loaded if there is no work. | No — files are immutable once written. To regenerate, delete the output file. |
+| **Summarize clusters** | `summarize_clusters.py` | `data/clustering/{scheme}/` | `data/cluster_summaries/{scheme}/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Item-level**: reuses `cluster_feedback_summary` from `initiative_details` when available (Phase 1). **Cache-level**: content-addressed cache (`_cluster_cache.json`) keyed by SHA-256 of sorted feedback IDs skips clusters with unchanged membership (Phase 3). **Batch-level**: per-batch files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery. | No — files are immutable once written. `_cluster_cache.json` is updated incrementally. |
+| **Merge cluster summaries** | `merge_cluster_feedback_summaries.py` | Cluster summaries + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None | In-place mutation: sets `cluster_feedback_summary` on each feedback item, `cluster_policy_summary` and `cluster_summaries` at initiative top level. |
+| **Build webapp index** | `build_webapp_index.py` | `data/scrape/initiative_details/` | `data/webapp/initiative_index.json` | None — always regenerates | Yes |
+|  |  |  | `data/webapp/global_stats.json` |  | Yes |
+|  |  |  | `data/webapp/country_stats.json` |  | Yes |
+|  |  |  | `data/webapp/initiative_details/{id}.json` |  | Yes — stripped copies (no `extracted_text`, `extracted_text_without_ocr`, `extracted_text_before_translation` on feedback attachments). |
 
-One JSON file per initiative (3,898 files) containing the complete record: all publications with their documents (full extracted text), all feedback items with their metadata (date, language, respondent type, country, organization) and attached files (full extracted text, translated to English where needed).
+### Resume and recovery patterns
 
-### Before/after analysis files (`data/analysis/before_after/*.json`)
+The pipeline uses three levels of resume to avoid redundant work:
 
-One JSON file per analysed initiative (all with feedback) with the data restructured for comparison:
+1. **File-level resume** (summarize_documents, summarize_changes, classify, summarize_clusters): if the output file for an initiative already exists in the output directory, the initiative is skipped entirely. The LLM model is not loaded if all work is already done. To force regeneration, delete the specific output file(s).
 
-- **`documents_before_feedback`** — full text of all documents published up to and including the first publication that received feedback
-- **`documents_after_feedback`** — full text of documents from the final publication (empty when no post-feedback documents exist)
-- **`middle_feedback`** — all feedback submitted between the first feedback publication and the final document publication
+2. **Batch-level crash recovery** (all vLLM-based scripts): within a single run, inference results are written to per-batch JSON files (`_batches*/batch_NNNN.json`). If the process crashes mid-run, restarting loads completed batches from disk and resumes from where it left off. Batch directories are auto-cleaned by `pipeline.sh` after successful remote runs.
 
-### AI-generated summaries (`data/analysis/summaries/*.json`)
+3. **Content-level caching** (summarize_clusters only): a content-addressed cache (`_cluster_cache.json`) maps SHA-256 hashes of sorted feedback ID sets to their cluster summaries. When cluster membership hasn't changed between runs, the cached summary is reused without LLM inference.
 
-Each document and feedback attachment in the before/after analysis is enriched with a `summary` field: a detailed summary (up to 10 paragraphs) generated by a 120-billion-parameter language model.
+### Derived field preservation across re-scrapes
 
-### Unified summaries (`data/analysis/unit_summaries/*.json`)
+The scraper (`scrape_eu_initiative_details.py`) uses a merge strategy when re-fetching stale initiatives. For each document and feedback attachment, if the source material (page count, file size, document ID, or feedback text) hasn't changed, all derived fields are preserved from the previous version:
 
-The `build_unit_summaries.py` script consolidates individual document and attachment summaries into per-initiative summary fields:
+| Derived field | Set by | Preserved on |
+|---|---|---|
+| `extracted_text_without_ocr` | `merge_ocr_results.py` | Attachments (when source unchanged) |
+| `extracted_text_before_translation` | `merge_translations.py` | Attachments (when source unchanged) |
+| `summary` | `summarize_documents.py` | Documents and attachments (when source unchanged) |
+| `cluster_feedback_summary` | `merge_cluster_feedback_summaries.py` | Feedback items (when `feedback_text` unchanged) |
+| `change_summary`, `diff` | `merge_change_summaries.py` | Initiative top level |
+| `cluster_policy_summary`, `cluster_summaries` | `merge_cluster_feedback_summaries.py` | Initiative top level |
 
-- **`before_feedback_summary`** — concatenation of all document summaries from before feedback
-- **`after_feedback_summary`** — concatenation of all document summaries from after feedback
-- **`combined_feedback_summary`** — on each feedback item: the free-text comment plus all attachment summaries, concatenated
+This means running the full pipeline, re-scraping, then running it again does not require re-doing all LLM inference — only initiatives with genuinely changed source data need reprocessing.
 
-### Change summaries (`data/analysis/change_summaries/*.json`)
+### Pull behavior (pipeline.sh)
 
-For initiatives that have both before- and after-feedback documents, a `change_summary` field describes the substantive policy changes between the two sets of documents. Generated by a 120-billion-parameter language model that receives both summaries and a unified diff.
+When pulling results from remote, `pipeline.sh` uses different strategies depending on whether output files are immutable:
 
-### Feedback clustering (`data/clustering/<scheme>/*.json`)
+| Pull target | rsync strategy | Rationale |
+|---|---|---|
+| `ocr` (single file) | Overwrite | OCR report is regenerated on each run |
+| `translation` (single file) | Overwrite | Combined translation output is regenerated on each run |
+| `translation` (batch dir) | Skip existing | Batch files are append-only, never modified |
+| `summaries` | Skip existing | File-level resume makes output files immutable |
+| `classification` | Skip existing | File-level resume makes output files immutable |
+| `clustering` | Overwrite | Files are overwritten every run (no `--skip-existing` in pipeline) |
+| `embeddings` | Overwrite | Files are overwritten when initiative data changes |
+| `cluster-summaries` | Skip existing | File-level resume makes output files immutable |
+| `change-summaries` | Skip existing | File-level resume makes output files immutable |
 
-Feedback is clustered across initiatives using sentence embeddings. Each clustering scheme (algorithm + model + parameters) produces its own subdirectory. Multiple schemes can be configured in `pipeline.conf`.
+### Output files overview
 
-### Cluster summaries (`data/cluster_summaries/<scheme>/*.json`)
-
-AI-generated summaries of each feedback cluster, produced by a 120-billion-parameter language model.
+```
+data/
+├── scrape/
+│   ├── eu_initiatives.csv                # Overwritten every scrape run
+│   ├── eu_initiatives_raw.json           # Overwritten every scrape run
+│   ├── initiative_details/{id}.json      # Mutated in-place by merge scripts;
+│   │                                     #   re-scraped with field preservation
+│   └── doc_cache/{id}/pub{pub}_doc{doc}_{name}  # Cached downloaded files, never deleted
+├── ocr/
+│   ├── short_pdf_report.json             # Overwritten by find_short_pdf_extractions
+│   ├── pdfs/{filename}                   # Downloaded PDFs for OCR
+│   └── short_pdf_report_ocr.json         # Overwritten by ocr_short_pdfs
+├── translation/
+│   ├── non_english_attachments.json      # Overwritten by find_non_english
+│   ├── non_english_attachments_translated.json      # Overwritten by translate
+│   └── non_english_attachments_translated_batches/  # Append-only batch files
+├── analysis/
+│   ├── before_after/{id}.json            # Overwritten by initiative_stats
+│   ├── summaries/{id}.json               # Immutable (file-level resume)
+│   │   ├── _batches_pass1/               # Crash recovery (auto-cleaned)
+│   │   └── _batches_pass2/               # Crash recovery (auto-cleaned)
+│   ├── unit_summaries/{id}.json          # Overwritten by build_unit_summaries
+│   └── change_summaries/{id}.json        # Immutable (file-level resume)
+│       └── _batches/                     # Crash recovery (auto-cleaned)
+├── clustering/{scheme}/
+│   └── {id}_{algo}_{model}_{params}.json # Overwritten every clustering run
+├── embeddings/{model}/{id}.npz           # Overwritten when data changes (hash-validated)
+├── classification/{id}.json              # Immutable (file-level resume)
+├── cluster_summaries/{scheme}/
+│   ├── {id}.json                         # Immutable (file-level resume)
+│   ├── _cluster_cache.json               # Content-addressed cache (updated incrementally)
+│   ├── _batches_p1/                      # Crash recovery (auto-cleaned)
+│   ├── _batches_p2/                      # Crash recovery (auto-cleaned)
+│   └── _batches_p3/                      # Crash recovery (auto-cleaned)
+└── webapp/
+    ├── initiative_index.json             # Overwritten by build_webapp_index
+    ├── global_stats.json                 # Overwritten by build_webapp_index
+    ├── country_stats.json                # Overwritten by build_webapp_index
+    └── initiative_details/{id}.json      # Overwritten (stripped copies, no extracted_text)
+```
 
 ### Web application (`webapp/`)
 
-A Next.js web application for browsing all initiatives and their feedback interactively. Features include:
+A Next.js web application for browsing all initiatives and their feedback interactively. See [`webapp/README.md`](webapp/README.md) for detailed documentation. Features include:
 
 - **Initiative index** with full-text search, sorting (most discussed, recently discussed, newest), filtering by stage/department/topic/policy area, and pagination
 - **Initiative detail** with expandable publication sections showing documents and feedback, AI-generated summaries (document, change, before/after), and clustered feedback visualization
@@ -206,12 +281,14 @@ A Next.js web application for browsing all initiatives and their feedback intera
 cd webapp && npm install && npm run dev
 ```
 
-The app reads data directly from the `data/` directory — no separate database or import step needed.
+The app reads pre-computed data from the `data/webapp/` directory and clustering data from `data/clustering/`. Requires `build_webapp_index.py` to have been run first. Data is loaded server-side with a 5-minute in-memory cache.
 
 ### Standalone viewers (`viewers/`)
 
 - **`viewer.html`** — Browse per-initiative JSON files in the browser. Tabbed navigation (Before Feedback, After Feedback, Feedback, Publications), expandable text blocks, user type color coding, feedback filtering, and chunked infinite scroll.
 - **`feedback-viewer.html`** — Browse clustered feedback results. Loads clustering JSON files, shows nested cluster trees with per-cluster country/user-type statistics, feedback search, and individual feedback items with attachments.
+
+Both are standalone HTML files with no dependencies. Open in any browser, then use the file picker to load JSON files.
 
 ## Data Structure
 
@@ -299,7 +376,7 @@ The pipeline has 28 stages that alternate between local processing and remote GP
 | 26–27 | `remote summarize-changes` → `pull change-summaries` | remote GPU | Detect before/after changes (120B LLM) |
 | 28 | `merge-change-summaries` | local | Merge change summaries back |
 
-All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. All stages support resume (skip already-processed items) and crash recovery (per-batch result files).
+All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (summarize, classify, summarize-clusters, summarize-changes) use file-level resume — they skip initiatives whose output already exists and don't load the model if there's no work. All LLM stages also write per-batch result files for crash recovery within a run. See [Resume and recovery patterns](#resume-and-recovery-patterns) for details.
 
 ## Pipeline Orchestration
 

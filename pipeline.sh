@@ -179,7 +179,8 @@ rsync_from_remote() {
         parallel_rsync "$tmpfile" "${REMOTE_HOST}:${REMOTE_DIR}/${remote_dir}/" "${local_dir}/" --ignore-existing
         rm -f "$tmpfile"
     else
-        rsync "${RSYNC_OPTS[@]}" --ignore-existing \
+        # Single files: always overwrite (they may be regenerated on re-runs)
+        rsync "${RSYNC_OPTS[@]}" \
             "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" "$local_path"
     fi
 }
@@ -444,12 +445,18 @@ do_pull() {
             ;;
         clustering)
             stage_start "pull clustering results"
-            rsync_from_remote data/clustering/ data/clustering/
+            # No --ignore-existing: clustering overwrites files on every run
+            mkdir -p data/clustering
+            rsync "${RSYNC_OPTS[@]}" \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/clustering/" data/clustering/
             stage_end "pull clustering results"
             ;;
         embeddings)
             stage_start "pull embeddings cache"
-            rsync_from_remote data/embeddings/ data/embeddings/
+            # No --ignore-existing: embeddings are overwritten when initiative data changes
+            mkdir -p data/embeddings
+            rsync "${RSYNC_OPTS[@]}" \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/embeddings/" data/embeddings/
             stage_end "pull embeddings cache"
             ;;
         cluster-summaries)
