@@ -133,16 +133,19 @@ def parse_title_and_summary(text: str) -> tuple[str, str]:
 # ── Text extraction helpers ──
 
 
-def get_policy_text(initiative: dict) -> str:
+def get_policy_text(initiative: dict, label: str = "") -> str:
     """Concatenate all publication document texts into a single policy text block."""
     parts = []
     for pub in initiative.get("publications", []):
+        pub_id = pub.get("id", "?")
         for doc in pub.get("documents", []):
+            doc_id = doc.get("document_id", "") or doc.get("id", "?")
+            doc_label = f"{label} pub={pub_id} doc={doc_id}" if label else f"pub={pub_id} doc={doc_id}"
             title = doc.get("title", "") or ""
             extracted = doc.get("extracted_text", "") or ""
             summary = doc.get("summary", "") or ""
 
-            text = extracted.strip() if not should_skip_text(extracted) else summary.strip()
+            text = extracted.strip() if not should_skip_text(extracted, label=doc_label) else summary.strip()
             if not text:
                 continue
 
@@ -154,7 +157,7 @@ def get_policy_text(initiative: dict) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def get_feedback_text(feedback_item: dict) -> str:
+def get_feedback_text(feedback_item: dict, label: str = "") -> str:
     """Concatenate feedback_text + all attachment texts for a single feedback item."""
     parts = []
     fb_text = (feedback_item.get("feedback_text", "") or "").strip()
@@ -162,9 +165,11 @@ def get_feedback_text(feedback_item: dict) -> str:
         parts.append(fb_text)
 
     for att in feedback_item.get("attachments", []):
+        att_id = att.get("id", "?")
+        att_label = f"{label} att={att_id}" if label else f"att={att_id}"
         extracted = att.get("extracted_text", "") or ""
         summary = att.get("summary", "") or ""
-        text = extracted.strip() if not should_skip_text(extracted) else summary.strip()
+        text = extracted.strip() if not should_skip_text(extracted, label=att_label) else summary.strip()
         if text:
             parts.append(text)
 
@@ -329,7 +334,7 @@ def process_all_initiatives(init_data, llm, sampling_params, encoding,
             reused_policy[init_id] = prev_ps
             reused_policy_count += 1
         else:
-            policy_text = get_policy_text(initiative)
+            policy_text = get_policy_text(initiative, label=f"init={init_id}")
             if policy_text and not should_skip_text(policy_text, label=f"init={init_id} policy"):
                 chunks = split_into_chunks(policy_text, chunk_size,
                                            label=f"init={init_id} policy")
@@ -371,8 +376,8 @@ def process_all_initiatives(init_data, llm, sampling_params, encoding,
 
             if fb is None:
                 continue
-            text = get_feedback_text(fb)
             label = f"init={init_id} fb={feedback_id}"
+            text = get_feedback_text(fb, label=label)
             if should_skip_text(text, label=label):
                 continue
             text = text.strip()
