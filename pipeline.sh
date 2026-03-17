@@ -262,6 +262,45 @@ scheme_output_dir() {
     echo "data/clustering/$1"
 }
 
+# ── Setup ────────────────────────────────────────────────────────────────────
+
+do_setup() {
+    stage_start "local setup"
+    echo "Installing Python dependencies (local)..."
+    uv sync
+    echo ""
+    echo "Logging in to Hugging Face (for model downloads)..."
+    echo "Get your token at https://huggingface.co/settings/tokens"
+    huggingface-cli login
+    stage_end "local setup"
+}
+
+do_setup_remote() {
+    stage_start "remote setup"
+
+    # Deploy source code
+    do_deploy
+
+    # Install Python dependencies on remote
+    echo "Installing Python dependencies (remote)..."
+    # shellcheck disable=SC2029
+    $SSH_CMD "cd ${REMOTE_DIR} && $PYTHON -m pip install \
+        vllm openai-harmony \
+        easyocr \
+        sentence-transformers scikit-learn hdbscan \
+        torch numpy \
+        huggingface-hub"
+
+    # Interactive HF login on remote (needs a TTY)
+    echo ""
+    echo "Logging in to Hugging Face on remote..."
+    echo "Get your token at https://huggingface.co/settings/tokens"
+    ssh -t -i "${SSH_KEY}" "${REMOTE_HOST}" \
+        "cd ${REMOTE_DIR} && huggingface-cli login"
+
+    stage_end "remote setup"
+}
+
 # ── Stages ───────────────────────────────────────────────────────────────────
 
 do_scrape() {
@@ -719,6 +758,10 @@ Full pipeline (./pipeline.sh full):
   27  pull change-summaries     Pull change summaries back
   28  merge-change-summaries    Merge change summaries into initiative_details
 
+Setup (run once before first pipeline run):
+  setup                    Install local Python deps (uv sync) + Hugging Face login
+  setup-remote             Deploy code + install remote Python deps (pip) + Hugging Face login
+
 Other commands:
   cluster                  Cluster all initiatives locally (per configured schemes)
   remote classify          Run GPU classification on remote
@@ -787,6 +830,8 @@ shift
 
 case "$STAGE" in
     list)               do_list ;;
+    setup)              do_setup ;;
+    setup-remote)       do_setup_remote ;;
     scrape)             do_scrape "$@" ;;
     find-short-pdfs)    do_find_short_pdfs "$@" ;;
     find-nonenglish)    do_find_nonenglish "$@" ;;

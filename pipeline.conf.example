@@ -6,6 +6,9 @@ REMOTE_DIR="/home/user/eu-pipeline"
 SSH_KEY="~/.ssh/id_ed25519"
 PYTHON="python3"
 
+# Run ./pipeline.sh setup and ./pipeline.sh setup-remote to install
+# dependencies and log in to Hugging Face (required for model downloads).
+
 # Clustering schemes (space-separated scheme directory names).
 # Each scheme name encodes the algorithm and parameters; pipeline.sh parses
 # them to construct cluster_all_initiatives.py CLI flags.

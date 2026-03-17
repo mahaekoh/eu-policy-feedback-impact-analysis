@@ -1,10 +1,26 @@
 [project]
 name = "eu-policy-feedback-impact-analysis"
 version = "0.1.0"
-description = "Add your description here"
+description = "Data pipeline for analyzing EU Better Regulation 'Have Your Say' public consultation feedback"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "pymupdf>=1.24.0",
+    "pymupdf4llm>=0.0.17",
+    "pypandoc>=1.13",
+    "pypandoc_binary>=1.13",
+    "docx2md>=0.1.0",
+    "huggingface-hub>=0.25.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "vllm>=0.7.0",
+    "openai-harmony",
     "easyocr>=1.7.2",
+    "sentence-transformers>=3.0.0",
+    "scikit-learn>=1.5.0",
     "hdbscan>=0.8.41",
+    "torch>=2.0.0",
+    "numpy>=1.26.0",
 ]
