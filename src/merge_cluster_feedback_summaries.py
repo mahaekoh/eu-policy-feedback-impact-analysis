@@ -57,8 +57,12 @@ def main():
     total_policy_merged = 0
     total_cluster_merged = 0
     modified_files = set()
+    n_files = len(summary_files)
 
-    for summary_file in summary_files:
+    print(f"Merging cluster feedback summaries into {args.details_dir}...")
+    for i, summary_file in enumerate(summary_files):
+        if i % 500 == 0:
+            print(f"  Processing {i}/{n_files}...")
         summary_path = os.path.join(args.summary_dir, summary_file)
         with open(summary_path, encoding="utf-8") as f:
             summary_data = json.load(f)

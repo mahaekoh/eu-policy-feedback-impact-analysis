@@ -127,7 +127,8 @@ def main():
         if p.stem.isdigit()
     )
 
-    print(f"Loading {len(init_ids)} initiatives from {args.details_dir}/\n")
+    n_ids = len(init_ids)
+    print(f"Loading {n_ids} initiatives from {args.details_dir}/\n")
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -140,7 +141,9 @@ def main():
     feedback_only_on_final = []  # initiatives where all feedback is on the final pub
     no_docs_after_first_fb = []  # initiatives with no publication documents after the first feedback pub
 
-    for init_id in init_ids:
+    for idx, init_id in enumerate(init_ids):
+        if idx % 500 == 0:
+            print(f"  Processing {idx}/{n_ids}...")
         initiative = load_initiative(args.details_dir, init_id)
         if not initiative:
             not_found.append(init_id)

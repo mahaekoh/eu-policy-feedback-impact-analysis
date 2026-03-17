@@ -448,7 +448,10 @@ def main():
 
     summaries = []
     errors = 0
-    for filename in files:
+    n_files = len(files)
+    for i, filename in enumerate(files):
+        if i % 500 == 0:
+            print(f"  Loading {i}/{n_files}...")
         filepath = os.path.join(details_dir, filename)
         try:
             with open(filepath, encoding="utf-8") as f:
@@ -477,9 +480,11 @@ def main():
         print(f"Removed {dupes} duplicates ({len(summaries)} remaining)")
 
     # Build global stats before stripping temporary fields
+    print("Computing global statistics...")
     global_stats = build_global_stats(summaries)
 
     # Build country stats (needs _feedback_items + all_months from global stats)
+    print("Computing per-country statistics...")
     all_months = [m for m, _ in global_stats["feedback_by_month"]]
     country_stats = build_country_stats(summaries, all_months)
 
@@ -492,6 +497,7 @@ def main():
         key=lambda s: s["last_cached_at"] or "", reverse=True
     )
 
+    print(f"Writing {args.output}...")
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(summaries, f, ensure_ascii=False)
@@ -500,6 +506,7 @@ def main():
     print(f"Wrote {args.output} ({size_mb:.1f} MB)")
 
     # Write global stats alongside the index
+    print("Writing global_stats.json...")
     stats_path = os.path.join(output_dir, "global_stats.json")
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(global_stats, f, ensure_ascii=False)
@@ -508,6 +515,7 @@ def main():
     print(f"Wrote {stats_path} ({stats_mb:.1f} MB)")
 
     # Write per-country stats
+    print("Writing country_stats.json...")
     country_stats_path = os.path.join(output_dir, "country_stats.json")
     with open(country_stats_path, "w", encoding="utf-8") as f:
         json.dump(country_stats, f, ensure_ascii=False)

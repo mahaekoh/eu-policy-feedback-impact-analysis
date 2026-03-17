@@ -35,6 +35,7 @@ def main():
     )
     args = parser.parse_args()
 
+    print(f"Loading OCR report from {args.report}...")
     with open(args.report, encoding="utf-8") as f:
         records = json.load(f)
 
@@ -52,8 +53,12 @@ def main():
     updated = 0
     skipped = 0
     modified_files = set()
+    n_inits = len(by_initiative)
 
-    for init_id, recs in sorted(by_initiative.items()):
+    print(f"Merging OCR results into {args.details_dir}...")
+    for j, (init_id, recs) in enumerate(sorted(by_initiative.items())):
+        if j % 100 == 0:
+            print(f"  Processing {j}/{n_inits} initiatives...")
         json_path = os.path.join(args.details_dir, f"{init_id}.json")
         if not os.path.isfile(json_path):
             print(f"  SKIP initiative {init_id}: file not found", file=sys.stderr)

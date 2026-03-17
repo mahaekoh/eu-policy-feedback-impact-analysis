@@ -73,7 +73,8 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     filenames = sorted(f for f in os.listdir(args.input_dir) if f.endswith(".json"))
-    print(f"Found {len(filenames)} initiative files in {args.input_dir}/")
+    n_files = len(filenames)
+    print(f"Found {n_files} initiative files in {args.input_dir}/")
 
     max_policy_len = 0
     max_policy_file = None
@@ -81,7 +82,10 @@ def main():
     max_feedback_file = None
     max_feedback_id = None
 
-    for filename in filenames:
+    print(f"Building unit summaries...")
+    for i, filename in enumerate(filenames):
+        if i % 500 == 0:
+            print(f"  Processing {i}/{n_files}...")
         filepath = os.path.join(args.input_dir, filename)
         with open(filepath, encoding="utf-8") as f:
             initiative = json.load(f)

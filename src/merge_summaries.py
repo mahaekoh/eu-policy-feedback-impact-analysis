@@ -53,8 +53,12 @@ def main():
     total_att_skipped_no_summary = 0
     total_skipped_not_found = 0
     modified_files = set()
+    n_files = len(summary_files)
 
-    for summary_file in summary_files:
+    print(f"Merging summaries into {args.details_dir}...")
+    for i, summary_file in enumerate(summary_files):
+        if i % 500 == 0:
+            print(f"  Processing {i}/{n_files}...")
         init_id = summary_file.replace(".json", "")
         summary_path = os.path.join(args.summary_dir, summary_file)
         with open(summary_path, encoding="utf-8") as f:

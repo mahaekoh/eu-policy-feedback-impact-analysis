@@ -90,6 +90,7 @@ def load_from_batches(batch_dir, details_dir, chunk_size, input_records_path=Non
     # Group entries by (initiative_id, feedback_id, attachment_id)
     by_attachment = {}  # key -> {"chunks": [...], "publication_id": ...}
     total_entries = 0
+    print(f"Loading {len(batch_files)} batch files...")
     for bf in batch_files:
         with open(os.path.join(batch_dir, bf), encoding="utf-8") as f:
             batch_results = json.load(f)
@@ -135,7 +136,11 @@ def load_from_batches(batch_dir, details_dir, chunk_size, input_records_path=Non
     # Reassemble per-attachment translations
     records = []
     missing_pub_id = 0
-    for (init_id, fb_id, att_id), info in by_attachment.items():
+    n_atts = len(by_attachment)
+    print(f"Reassembling {n_atts} attachment translations...")
+    for j, ((init_id, fb_id, att_id), info) in enumerate(by_attachment.items()):
+        if j % 5000 == 0:
+            print(f"  Reassembling {j}/{n_atts}...")
         chunks = info["chunks"]
         pub_id = info["publication_id"]
 
@@ -272,8 +277,12 @@ def main():
     updated = 0
     skipped_lookup = 0
     modified_files = set()
+    n_inits = len(by_initiative)
 
-    for init_id, recs in sorted(by_initiative.items()):
+    print(f"Merging translations into {args.details_dir} ({n_inits} initiatives)...")
+    for j, (init_id, recs) in enumerate(sorted(by_initiative.items())):
+        if j % 500 == 0:
+            print(f"  Processing {j}/{n_inits} initiatives...")
         json_path = os.path.join(args.details_dir, f"{init_id}.json")
         if not os.path.isfile(json_path):
             print(f"  SKIP initiative {init_id}: file not found", file=sys.stderr)
