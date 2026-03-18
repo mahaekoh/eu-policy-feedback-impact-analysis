@@ -557,10 +557,7 @@ do_pull() {
             ;;
         clustering)
             stage_start "pull clustering results"
-            # No --ignore-existing: clustering overwrites files on every run
-            mkdir -p data/clustering
-            rsync "${RSYNC_OPTS[@]}" \
-                "${REMOTE_HOST}:${REMOTE_DIR}/data/clustering/" data/clustering/
+            rsync_from_remote data/clustering/ data/clustering/
             stage_end "pull clustering results"
             ;;
         embeddings)

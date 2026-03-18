@@ -156,7 +156,7 @@ Required variables:
 
 Remote commands run via `nohup` with stdout/stderr piped to log files under `logs/` on the remote host. This ensures long-running GPU jobs survive SSH disconnects. The local terminal tails the log in real-time and reads the exit code from a `.exit` status file when the job completes. Batch directories (`_batches*`) are auto-cleaned on successful completion.
 
-Push/pull operations use parallel rsync (4 streams by default) with `--files-from` chunking for directory transfers. Pull behavior varies by target: immutable LLM output directories (summaries, classification, cluster-summaries, change-summaries) use `--ignore-existing` to skip already-downloaded files. Targets that are overwritten on every run (clustering, embeddings, single files like OCR/translation reports) use plain rsync without `--ignore-existing` to ensure local copies stay current.
+Push/pull operations use parallel rsync (4 streams by default) with `--files-from` chunking for directory transfers. Pull behavior varies by target: immutable LLM output directories (summaries, classification, clustering, cluster-summaries, change-summaries) use `--ignore-existing` to skip already-downloaded files. Targets that are overwritten on every run (embeddings, single files like OCR/translation reports) use plain rsync without `--ignore-existing` to ensure local copies stay current.
 
 ## Scripts
 
