@@ -106,6 +106,7 @@ Required variables:
 ./pipeline.sh logs                     # list recent remote logs
 ./pipeline.sh logs tail [step]         # tail a specific step's log
 ./pipeline.sh clean-batches <target>   # delete batch files on remote
+./pipeline.sh recover                 # pull all outputs from remote + merge locally + rebuild index
 ```
 
 ### Full pipeline stage order (28 stages)

@@ -421,6 +421,14 @@ do_build_index() {
             -o data/webapp/initiative_index.json "$@"
 }
 
+do_merge_summaries() {
+    count_json data/analysis/summaries "document summary files"
+    run_local "merge document/attachment summaries" \
+        $PYTHON src/merge_summaries.py \
+            data/analysis/summaries \
+            data/scrape/initiative_details "$@"
+}
+
 do_merge_change_summaries() {
     count_json data/analysis/change_summaries "change summary files"
     run_local "merge change summaries" \
@@ -881,6 +889,7 @@ Individual stages (for ad-hoc use):
   build-summaries          Build unit summaries (local)
   build-index              Build webapp index (local)
   cluster                  Cluster all initiatives locally
+  merge-summaries          Merge doc/attachment summaries (local)
   merge-change-summaries   Merge change summaries (local)
   merge-cluster-feedback-summaries  Merge cluster feedback summaries (local)
   remote ocr               Run GPU OCR on remote
@@ -890,6 +899,10 @@ Individual stages (for ad-hoc use):
   remote cluster           Run GPU clustering on remote
   remote summarize-clusters  Run GPU cluster summarization on remote
   remote summarize-changes   Run GPU change summarization on remote
+
+Recovery:
+  recover                  Pull all outputs from remote + merge locally + rebuild index
+                           Use after a crash to salvage intermediate results
 
 Other commands:
   deploy                   Rsync code to remote
@@ -954,6 +967,128 @@ do_clean_batches() {
     esac
 }
 
+# ── Recover ──────────────────────────────────────────────────────────────────
+
+# Pull all available output files from remote and merge them into
+# initiative_details locally.  Useful when a pipeline run crashes partway
+# through — intermediate results that were already written to disk on the
+# remote can still be recovered and merged.
+#
+# Each pull and merge step is run with || true so that missing remote
+# directories (from stages that never ran) don't abort the recovery.
+
+do_recover() {
+    echo ""
+    echo "============================================================"
+    echo "[$(timestamp)] RECOVER: pulling outputs from remote"
+    echo "============================================================"
+
+    # Pull initiative_details (authoritative copy with any merges applied on remote)
+    echo ""
+    echo "--- Pulling initiative_details ---"
+    do_pull initiative-details || echo "  (skipped — not available on remote)"
+
+    # Pull each pipeline output category
+    echo ""
+    echo "--- Pulling OCR results ---"
+    do_pull ocr || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling translation results ---"
+    do_pull translation || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling document summaries ---"
+    do_pull summaries || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling change summaries ---"
+    do_pull change-summaries || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling cluster summaries ---"
+    do_pull cluster-summaries || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling clustering results ---"
+    do_pull clustering || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling embeddings ---"
+    do_pull embeddings || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "============================================================"
+    echo "[$(timestamp)] RECOVER: merging outputs into initiative_details"
+    echo "============================================================"
+
+    # Run all merge scripts locally.  Each tolerates missing input gracefully.
+    echo ""
+    echo "--- Merging OCR results ---"
+    if [ -f data/ocr/short_pdf_report_ocr.json ]; then
+        do_merge_ocr
+    else
+        echo "  (skipped — no OCR report)"
+    fi
+
+    echo ""
+    echo "--- Merging translations ---"
+    if [ -f data/translation/non_english_attachments_translated.json ]; then
+        do_merge_translations
+    elif [ -d data/translation/non_english_attachments_translated_batches ]; then
+        run_local "merge translations (from batches)" \
+            $PYTHON src/merge_translations.py \
+                data/translation/non_english_attachments_translated_batches \
+                data/scrape/initiative_details \
+                --chunk-size 16384
+    else
+        echo "  (skipped — no translation output)"
+    fi
+
+    echo ""
+    echo "--- Merging document/attachment summaries ---"
+    if [ -d data/analysis/summaries ]; then
+        do_merge_summaries
+    else
+        echo "  (skipped — no summaries directory)"
+    fi
+
+    echo ""
+    echo "--- Merging change summaries ---"
+    if [ -d data/analysis/change_summaries ]; then
+        do_merge_change_summaries
+    else
+        echo "  (skipped — no change summaries directory)"
+    fi
+
+    echo ""
+    echo "--- Merging cluster feedback summaries ---"
+    if [ -n "$CLUSTER_SCHEMES" ]; then
+        for scheme in $CLUSTER_SCHEMES; do
+            if [ -d "data/cluster_summaries/${scheme}" ]; then
+                count_json "data/cluster_summaries/${scheme}" "cluster summary files ($scheme)"
+                run_local "merge cluster feedback summaries ($scheme)" \
+                    $PYTHON src/merge_cluster_feedback_summaries.py \
+                        "data/cluster_summaries/${scheme}" \
+                        data/scrape/initiative_details
+            else
+                echo "  (skipped — no cluster summaries for $scheme)"
+            fi
+        done
+    else
+        echo "  (skipped — CLUSTER_SCHEMES not set)"
+    fi
+
+    echo ""
+    echo "--- Rebuilding webapp index ---"
+    do_build_index
+
+    echo ""
+    echo "============================================================"
+    echo "[$(timestamp)] RECOVER COMPLETE"
+    echo "============================================================"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 STAGE="${1:?Usage: pipeline.sh <stage> [extra-args...]}"
@@ -972,6 +1107,7 @@ case "$STAGE" in
     build-summaries)    do_build_summaries "$@" ;;
     cluster)            do_cluster "$@" ;;
     build-index)        do_build_index "$@" ;;
+    merge-summaries) do_merge_summaries "$@" ;;
     merge-change-summaries) do_merge_change_summaries "$@" ;;
     merge-cluster-feedback-summaries) do_merge_cluster_feedback_summaries "$@" ;;
     deploy)             do_deploy ;;
@@ -981,6 +1117,7 @@ case "$STAGE" in
     logs)               do_logs "$@" ;;
     clean-batches)      do_clean_batches "$@" ;;
     full)               do_full "$@" ;;
+    recover)            do_recover ;;
     *)
         echo "ERROR: Unknown stage: $STAGE"
         echo "Run './pipeline.sh list' to see available stages."
