@@ -131,7 +131,7 @@ run_remote() {
     stage_end "remote $name"
 }
 
-RSYNC_OPTS=(-avz -e "ssh -i ${SSH_KEY}")
+RSYNC_OPTS=(-avz -e "ssh -i ${SSH_KEY} -o ServerAliveInterval=30 -o ServerAliveCountMax=5")
 PARALLEL_JOBS=4
 
 # Split a file list into N chunks and run parallel rsync with --files-from.
@@ -451,6 +451,28 @@ do_merge_cluster_feedback_summaries() {
     done
 }
 
+do_merge_cluster_rewrites() {
+    local format="${1:?Usage: pipeline.sh merge-cluster-rewrites <format>}"
+    shift
+    if [ -z "$CLUSTER_SCHEMES" ]; then
+        echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+        exit 1
+    fi
+    for scheme in $CLUSTER_SCHEMES; do
+        local rewrite_dir="data/cluster_rewrites/${format}/${scheme}"
+        if [ -d "$rewrite_dir" ]; then
+            count_json "$rewrite_dir" "rewrite files ($format, $scheme)"
+            run_local "merge cluster rewrites ($format, $scheme)" \
+                $PYTHON src/merge_cluster_rewrites.py \
+                    "$rewrite_dir" \
+                    data/scrape/initiative_details \
+                    --format "$format" "$@"
+        else
+            echo "  (skipped — no rewrites for $format/$scheme)"
+        fi
+    done
+}
+
 # ── Deploy / sync ────────────────────────────────────────────────────────────
 
 do_deploy() {
@@ -502,6 +524,11 @@ do_push() {
             rsync_to_remote data/clustering/ data/clustering/
             stage_end "push clustering data"
             ;;
+        cluster-rewrites)
+            stage_start "push cluster rewrites"
+            rsync_to_remote data/cluster_rewrites/ data/cluster_rewrites/
+            stage_end "push cluster rewrites"
+            ;;
         all)
             do_push initiative-details
             do_push ocr
@@ -509,10 +536,11 @@ do_push() {
             do_push analysis
             do_push unit-summaries
             do_push clustering
+            do_push cluster-rewrites
             ;;
         *)
             echo "ERROR: Unknown push target: $target"
-            echo "Valid targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering, all"
+            echo "Valid targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering, cluster-rewrites, all"
             exit 1
             ;;
     esac
@@ -526,9 +554,16 @@ do_pull() {
             stage_start "pull initiative details"
             # Overwrite local: remote has authoritative copy with all merges applied
             mkdir -p data/scrape/initiative_details
-            rsync "${RSYNC_OPTS[@]}" \
+            local tmpfile
+            tmpfile=$(mktemp)
+            rsync "${RSYNC_OPTS[@]}" --list-only \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/scrape/initiative_details/" \
+                data/scrape/initiative_details/ 2>/dev/null | \
+                awk '/^-/ {print $NF}' | sort > "$tmpfile"
+            parallel_rsync "$tmpfile" \
                 "${REMOTE_HOST}:${REMOTE_DIR}/data/scrape/initiative_details/" \
                 data/scrape/initiative_details/
+            rm -f "$tmpfile"
             stage_end "pull initiative details"
             ;;
         ocr)
@@ -573,6 +608,11 @@ do_pull() {
             rsync_from_remote_exclude data/cluster_summaries/ data/cluster_summaries/ '_batches*'
             stage_end "pull cluster summaries"
             ;;
+        cluster-rewrites)
+            stage_start "pull cluster rewrites"
+            rsync_from_remote_exclude data/cluster_rewrites/ data/cluster_rewrites/ '_batches*'
+            stage_end "pull cluster rewrites"
+            ;;
         change-summaries)
             stage_start "pull change summaries"
             rsync_from_remote_exclude data/analysis/change_summaries/ data/analysis/change_summaries/ '_batches*'
@@ -581,8 +621,14 @@ do_pull() {
         webapp)
             stage_start "pull webapp data"
             mkdir -p data/webapp
-            rsync "${RSYNC_OPTS[@]}" \
+            local tmpfile
+            tmpfile=$(mktemp)
+            rsync "${RSYNC_OPTS[@]}" --list-only \
+                "${REMOTE_HOST}:${REMOTE_DIR}/data/webapp/" data/webapp/ 2>/dev/null | \
+                awk '/^-/ {print $NF}' | sort > "$tmpfile"
+            parallel_rsync "$tmpfile" \
                 "${REMOTE_HOST}:${REMOTE_DIR}/data/webapp/" data/webapp/
+            rm -f "$tmpfile"
             stage_end "pull webapp data"
             ;;
         logs)
@@ -601,12 +647,13 @@ do_pull() {
             do_pull clustering
             do_pull embeddings
             do_pull cluster-summaries
+            do_pull cluster-rewrites
             do_pull change-summaries
             do_pull webapp
             ;;
         *)
             echo "ERROR: Unknown pull target: $target"
-            echo "Valid targets: initiative-details, ocr, translation, summaries, classification, clustering, embeddings, cluster-summaries, change-summaries, webapp, logs, all"
+            echo "Valid targets: initiative-details, ocr, translation, summaries, classification, clustering, embeddings, cluster-summaries, cluster-rewrites, change-summaries, webapp, logs, all"
             exit 1
             ;;
     esac
@@ -703,6 +750,25 @@ do_remote() {
                     data/analysis/unit_summaries/ \
                     -o data/analysis/change_summaries/ "$@"
             ;;
+        rewrite-clusters)
+            local format="${1:?Usage: pipeline.sh remote rewrite-clusters <format>}"
+            shift
+            if [ -z "$CLUSTER_SCHEMES" ]; then
+                echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+                exit 1
+            fi
+            for scheme in $CLUSTER_SCHEMES; do
+                local summary_dir="data/cluster_summaries/${scheme}"
+                local rewrite_dir="data/cluster_rewrites/${format}/${scheme}"
+                REMOTE_BATCH_DIRS="$rewrite_dir/_batches"
+                run_remote "rewrite-clusters ($format, $scheme)" \
+                    $PYTHON src/rewrite_cluster_summaries.py \
+                        "$summary_dir" \
+                        data/analysis/unit_summaries \
+                        -o "$rewrite_dir" \
+                        --format "$format" "$@"
+            done
+            ;;
         # ── Composite pipeline steps (chain find/merge with GPU steps on remote) ──
         ocr-pipeline)
             run_remote "ocr-pipeline" \
@@ -738,6 +804,22 @@ do_remote() {
                     "&& $PYTHON src/merge_cluster_feedback_summaries.py $summary_dir data/scrape/initiative_details"
             done
             ;;
+        rewrite-clusters-pipeline)
+            local format="${1:?Usage: pipeline.sh remote rewrite-clusters-pipeline <format>}"
+            shift
+            if [ -z "$CLUSTER_SCHEMES" ]; then
+                echo "ERROR: CLUSTER_SCHEMES not set in pipeline.conf"
+                exit 1
+            fi
+            for scheme in $CLUSTER_SCHEMES; do
+                local summary_dir="data/cluster_summaries/${scheme}"
+                local rewrite_dir="data/cluster_rewrites/${format}/${scheme}"
+                REMOTE_BATCH_DIRS="$rewrite_dir/_batches"
+                run_remote "rewrite-clusters ($format, $scheme)" \
+                    "$PYTHON src/rewrite_cluster_summaries.py $summary_dir data/analysis/unit_summaries -o $rewrite_dir --format $format" \
+                    "&& $PYTHON src/merge_cluster_rewrites.py $rewrite_dir data/scrape/initiative_details --format $format"
+            done
+            ;;
         change-summarize-pipeline)
             REMOTE_BATCH_DIRS="data/analysis/change_summaries/_batches data/analysis/change_summaries/_batches_combine"
             run_remote "change-summarize-pipeline" \
@@ -752,9 +834,11 @@ do_remote() {
             ;;
         *)
             echo "ERROR: Unknown remote step: $step"
-            echo "Valid steps: ocr, translate, summarize, classify, cluster, summarize-clusters, summarize-changes,"
+            echo "Valid steps: ocr, translate, summarize, classify, cluster, summarize-clusters,"
+            echo "             summarize-changes, rewrite-clusters,"
             echo "             ocr-pipeline, translate-pipeline, summarize-pipeline,"
-            echo "             cluster-summarize-pipeline, change-summarize-pipeline, build-index"
+            echo "             cluster-summarize-pipeline, rewrite-clusters-pipeline,"
+            echo "             change-summarize-pipeline, build-index"
             exit 1
             ;;
     esac
@@ -785,19 +869,23 @@ do_full() {
     # Phase 7: Cluster summarization + merge (on remote, per scheme)
     do_remote cluster-summarize-pipeline
 
-    # Phase 8: Change summarization + merge (on remote)
+    # Phase 8: Cluster summary rewrites + merge (on remote, per scheme)
+    do_remote rewrite-clusters-pipeline reddit
+
+    # Phase 9: Change summarization + merge (on remote)
     do_remote change-summarize-pipeline
 
-    # Phase 9: Build webapp index (on remote, after all merges)
+    # Phase 10: Build webapp index (on remote, after all merges)
     do_remote build-index
 
-    # Phase 10: Pull all results back
+    # Phase 11: Pull all results back
     do_pull initiative-details
     do_pull clustering
     do_pull embeddings
     do_pull webapp
     do_pull summaries
     do_pull cluster-summaries
+    do_pull cluster-rewrites
     do_pull change-summaries
 
     echo ""
@@ -862,15 +950,17 @@ Full pipeline (./pipeline.sh full):
    6  remote summarize-pipeline            Analyze + GPU summarize + build summaries (remote)
    7  remote cluster                       GPU clustering (remote, multi-GPU)
    8  remote cluster-summarize-pipeline    GPU cluster summarize + merge (remote, per scheme)
-   9  remote change-summarize-pipeline     GPU change summarize + merge (remote)
-  10  remote build-index                   Build webapp index (remote)
-  11  pull initiative-details              Pull initiative data with all merges applied
-  12  pull clustering                      Pull clustering results
-  13  pull embeddings                      Pull embeddings cache
-  14  pull webapp                          Pull webapp data
-  15  pull summaries                       Pull document summaries
-  16  pull cluster-summaries               Pull cluster summaries
-  17  pull change-summaries                Pull change summaries
+   9  remote rewrite-clusters-pipeline     GPU cluster rewrite + merge (remote, per scheme)
+  10  remote change-summarize-pipeline     GPU change summarize + merge (remote)
+  11  remote build-index                   Build webapp index (remote)
+  12  pull initiative-details              Pull initiative data with all merges applied
+  13  pull clustering                      Pull clustering results
+  14  pull embeddings                      Pull embeddings cache
+  15  pull webapp                          Pull webapp data
+  16  pull summaries                       Pull document summaries
+  17  pull cluster-summaries               Pull cluster summaries
+  18  pull cluster-rewrites                Pull cluster rewrites
+  19  pull change-summaries                Pull change summaries
 
 Setup (run once before first pipeline run):
   setup                    Install local Python deps (uv sync) + Hugging Face login
@@ -889,12 +979,14 @@ Individual stages (for ad-hoc use):
   merge-summaries          Merge doc/attachment summaries (local)
   merge-change-summaries   Merge change summaries (local)
   merge-cluster-feedback-summaries  Merge cluster feedback summaries (local)
+  merge-cluster-rewrites <format>  Merge cluster rewrites (local)
   remote ocr               Run GPU OCR on remote
   remote translate         Run GPU translation on remote
   remote summarize         Run GPU document summarization on remote
   remote classify          Run GPU classification on remote
   remote cluster           Run GPU clustering on remote
   remote summarize-clusters  Run GPU cluster summarization on remote
+  remote rewrite-clusters <format>  Run GPU cluster rewrite on remote
   remote summarize-changes   Run GPU change summarization on remote
 
 Recovery:
@@ -909,9 +1001,10 @@ Other commands:
   logs                     List recent remote logs
   logs tail [step]         Tail most recent log
 
-Push targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering, all
+Push targets: initiative-details, ocr, translation, analysis, unit-summaries, clustering,
+              cluster-rewrites, all
 Pull targets: initiative-details, ocr, translation, summaries, classification, clustering,
-              embeddings, cluster-summaries, change-summaries, webapp, logs, all
+              embeddings, cluster-summaries, cluster-rewrites, change-summaries, webapp, logs, all
 
 Push/pull use parallel rsync (4 streams). Extra args are passed through to Python scripts.
 EOF
@@ -950,15 +1043,22 @@ do_clean_batches() {
             $SSH_CMD "rm -rf ${REMOTE_DIR}/data/translation/non_english_attachments_translated_batches"
             stage_end "clean translation batch files (remote)"
             ;;
+        cluster-rewrites)
+            stage_start "clean cluster rewrite batch files (remote)"
+            # shellcheck disable=SC2029
+            $SSH_CMD "find ${REMOTE_DIR}/data/cluster_rewrites -name '_batches*' -type d -exec rm -rf {} + 2>/dev/null || true"
+            stage_end "clean cluster rewrite batch files (remote)"
+            ;;
         all)
             do_clean_batches summaries
             do_clean_batches cluster-summaries
+            do_clean_batches cluster-rewrites
             do_clean_batches change-summaries
             do_clean_batches translation
             ;;
         *)
             echo "ERROR: Unknown clean-batches target: $target"
-            echo "Valid targets: summaries, cluster-summaries, change-summaries, translation, all"
+            echo "Valid targets: summaries, cluster-summaries, cluster-rewrites, change-summaries, translation, all"
             exit 1
             ;;
     esac
@@ -1005,6 +1105,10 @@ do_recover() {
     echo ""
     echo "--- Pulling cluster summaries ---"
     do_pull cluster-summaries || echo "  (skipped — not available on remote)"
+
+    echo ""
+    echo "--- Pulling cluster rewrites ---"
+    do_pull cluster-rewrites || echo "  (skipped — not available on remote)"
 
     echo ""
     echo "--- Pulling clustering results ---"
@@ -1077,6 +1181,19 @@ do_recover() {
     fi
 
     echo ""
+    echo "--- Merging cluster rewrites ---"
+    if [ -d data/cluster_rewrites ]; then
+        for format_dir in data/cluster_rewrites/*/; do
+            [ -d "$format_dir" ] || continue
+            local format_name
+            format_name=$(basename "$format_dir")
+            do_merge_cluster_rewrites "$format_name"
+        done
+    else
+        echo "  (skipped — no cluster rewrites directory)"
+    fi
+
+    echo ""
     echo "--- Rebuilding webapp index ---"
     do_build_index
 
@@ -1107,6 +1224,7 @@ case "$STAGE" in
     merge-summaries) do_merge_summaries "$@" ;;
     merge-change-summaries) do_merge_change_summaries "$@" ;;
     merge-cluster-feedback-summaries) do_merge_cluster_feedback_summaries "$@" ;;
+    merge-cluster-rewrites) do_merge_cluster_rewrites "$@" ;;
     deploy)             do_deploy ;;
     push)               do_push "$@" ;;
     pull)               do_pull "$@" ;;

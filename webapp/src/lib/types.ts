@@ -193,9 +193,15 @@ export function formatUserType(userType: string): string {
 
 // --- Clustering types ---
 
+export interface ClusterRewriteEntry {
+  title: string;
+  body: string;
+}
+
 export interface ClusterSummaryEntry {
   title: string;
   summary: string;
+  rewrites?: Record<string, ClusterRewriteEntry>;
 }
 
 export interface ClusterSummaries {

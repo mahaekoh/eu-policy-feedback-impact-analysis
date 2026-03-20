@@ -37,6 +37,7 @@ data/
   embeddings/                      # Cached sentence embeddings (per-model subdirs)
   classification/                  # Classification output
   cluster_summaries/               # Cluster summary output (per-scheme subdirs)
+  cluster_rewrites/                # Cluster rewrite output (per-format/per-scheme subdirs)
   webapp/                          # Pre-computed webapp data
     initiative_index.json          # Pre-built initiative index
     global_stats.json              # Aggregate cross-initiative statistics
@@ -65,6 +66,8 @@ cluster_all_initiatives.py        → data/clustering/<scheme>/*.json
 classify_initiative_and_feedback.py → data/classification/*.json
 summarize_clusters.py             → data/cluster_summaries/<scheme>/*.json + _cluster_cache.json
 merge_cluster_feedback_summaries.py → updates data/scrape/initiative_details/*.json in-place
+rewrite_cluster_summaries.py      → data/cluster_rewrites/<format>/<scheme>/*.json
+merge_cluster_rewrites.py         → updates data/scrape/initiative_details/*.json in-place (cluster_summaries rewrites)
 build_webapp_index.py             → data/webapp/initiative_index.json + global_stats.json + country_stats.json + initiative_details/
 ```
 
@@ -109,7 +112,7 @@ Required variables:
 ./pipeline.sh recover                 # pull all outputs from remote + merge locally + rebuild index
 ```
 
-### Full pipeline stage order (28 stages)
+### Full pipeline stage order (30 stages)
 
 1. `scrape` — Runs both scrape scripts locally
 2. `find-short-pdfs` — Finds short PDF extractions
@@ -136,21 +139,23 @@ Required variables:
 23. `remote summarize-clusters` — Runs cluster summarization on remote GPU (per scheme)
 24. `pull cluster-summaries` — Downloads cluster summaries
 25. `merge-cluster-feedback-summaries` — Merges cluster summaries locally (per scheme)
-26. `remote summarize-changes` — Runs change summarization on remote GPU
-27. `pull change-summaries` — Downloads change summaries
-28. `merge-change-summaries` — Merges change summaries locally
+26. `remote rewrite-clusters` — Rewrites cluster summaries on remote GPU (per scheme)
+27. `merge-cluster-rewrites` — Merges cluster rewrites locally (per scheme)
+28. `remote summarize-changes` — Runs change summarization on remote GPU
+29. `pull change-summaries` — Downloads change summaries
+30. `merge-change-summaries` — Merges change summaries locally
 
 ### Push targets
 
-`ocr`, `translation`, `analysis`, `unit-summaries`, `clustering`, `all`
+`ocr`, `translation`, `analysis`, `unit-summaries`, `clustering`, `cluster-rewrites`, `all`
 
 ### Pull targets
 
-`ocr`, `translation`, `summaries`, `classification`, `clustering`, `embeddings`, `cluster-summaries`, `change-summaries`, `logs`, `all`
+`ocr`, `translation`, `summaries`, `classification`, `clustering`, `embeddings`, `cluster-summaries`, `cluster-rewrites`, `change-summaries`, `logs`, `all`
 
 ### Remote GPU steps
 
-`ocr`, `translate`, `summarize`, `classify`, `cluster`, `summarize-clusters`, `summarize-changes`
+`ocr`, `translate`, `summarize`, `classify`, `cluster`, `summarize-clusters`, `rewrite-clusters`, `summarize-changes`
 
 ### Remote execution model
 
@@ -386,6 +391,33 @@ Supports resume: skips initiatives whose output already exists. Per-batch result
 | `details_dir` | str (positional) | — | Directory of per-initiative JSON files |
 | `--dry-run` | flag | — | Print proposed changes without modifying files |
 
+### Cluster rewrite pipeline
+
+**`src/rewrite_cluster_summaries.py`** — Rewrites cluster summaries into shorter formats using vLLM batch inference with `unsloth/gpt-oss-120b`. Takes cluster summary output and unit summaries as input. For regular clusters, rewrites the cluster summary. For noise clusters (`-1:feedback_id`), uses `combined_feedback_summary` from unit summaries as richer input, falling back to the cluster summary. Supports a format registry with named formats (currently: `"reddit"`). Single-pass inference (no chunking/combining needed). Output: per-initiative JSON files in `data/cluster_rewrites/<format>/<scheme>/`.
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `cluster_summary_dir` | str (positional) | — | Directory of cluster summary JSON files (output of `summarize_clusters.py`) |
+| `unit_summaries_dir` | str (positional) | — | Directory of unit summary JSON files (output of `build_unit_summaries.py`) |
+| `-o, --output` | str | — (required) | Output directory for rewrite JSONs |
+| `--format` | str | — (required) | Rewrite format name (e.g. `reddit`) |
+| `--model` | str | `unsloth/gpt-oss-120b` | Model name or path |
+| `--max-tokens` | int | `4096` | Max output tokens per rewrite |
+| `--max-model-len` | int | `None` | Max model context length |
+| `--temperature` | float | `0.15` | Sampling temperature |
+| `--batch-size` | int | `2048` | Number of prompts per inference batch |
+
+Supports resume: skips initiatives whose output already exists. Per-batch result files in `_batches/` provide crash recovery.
+
+**`src/merge_cluster_rewrites.py`** — Merges cluster summary rewrites back into initiative detail JSON files. Sets `cluster_summaries[label]["rewrites"][format] = {title, body}` for each label. Multiple format merges accumulate additively in the `rewrites` dict. Never touches the original `title`/`summary`/`feedback_count`. The `rewrites` field survives re-scrapes because `cluster_summaries` is a top-level derived field preserved by the scraper merge strategy.
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `rewrite_dir` | str (positional) | — | Directory of rewrite JSON files (output of `rewrite_cluster_summaries.py`) |
+| `details_dir` | str (positional) | — | Directory of per-initiative JSON files |
+| `--format` | str | — (required) | Rewrite format name (e.g. `reddit`) |
+| `--dry-run` | flag | — | Print proposed changes without modifying files |
+
 ### Webapp index
 
 **`src/build_webapp_index.py`** — Pre-computes the webapp initiative index, aggregate statistics, and per-country drill-down data. Reads from `data/scrape/initiative_details/`, writes:
@@ -435,7 +467,7 @@ A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback i
   Helper `findClusteringFile(id, schemeDir)` searches for `{id}.json` or `{id}_{params}.json` in scheme directories.
 
 - **`src/lib/types.ts`** — TypeScript interfaces and utility functions:
-  - **Data interfaces**: `Attachment`, `Feedback`, `Document`, `Publication`, `Initiative`, `InitiativeSummary`, `GlobalStats`, `CountryStatsEntry`, `CountryStats`, `ClusterData`, `ClusterNode`, `ClusterSummaryEntry`
+  - **Data interfaces**: `Attachment`, `Feedback`, `Document`, `Publication`, `Initiative`, `InitiativeSummary`, `GlobalStats`, `CountryStatsEntry`, `CountryStats`, `ClusterData`, `ClusterNode`, `ClusterSummaryEntry`, `ClusterRewriteEntry`
   - **Constants**: `USER_TYPE_COLORS`, `USER_TYPE_BAR_COLORS`, `USER_TYPE_SHORT` (color/label mappings), `COUNTRY_BAR_COLORS` (palette), `ISO3_TO_ISO2` (country code mapping)
   - **Utility functions**: `countryToFlag()`, `getUserTypeColor()`, `formatUserType()`, `buildClusterTree()`, `computeClusterStats()`
 
@@ -456,8 +488,8 @@ A Next.js 16 web application (`webapp/`) for browsing initiatives and feedback i
 | `feedback-card.tsx` | Single feedback item with attachments |
 | `feedback-list.tsx` | Feedback list with filters and infinite scroll |
 | `charts.tsx` | Statistical visualizations (time series, breakdowns, cross-tabs) |
-| `cluster-view.tsx` | Cluster visualization and navigation |
-| `cluster-node.tsx` | Individual cluster node in tree |
+| `cluster-view.tsx` | Cluster visualization and navigation with display format selector |
+| `cluster-node.tsx` | Individual cluster node in tree with rewrite display support |
 | `cluster-stats-bar.tsx` | Country/user-type bar charts for clusters |
 | `expandable-text.tsx` | Collapsible text blocks for summaries |
 | `ui/*` | shadcn/ui primitives (Badge, Button, Card, Input, Select) |

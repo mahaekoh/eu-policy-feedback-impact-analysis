@@ -115,6 +115,7 @@ interface ClusterNodeComponentProps {
   isSubCluster?: boolean;
   timeRange: TimeRange;
   summaryLookup?: Record<string, ClusterSummaryEntry>;
+  displayFormat?: string;
 }
 
 export function ClusterNodeComponent({
@@ -122,6 +123,7 @@ export function ClusterNodeComponent({
   isSubCluster = false,
   timeRange,
   summaryLookup,
+  displayFormat = "full",
 }: ClusterNodeComponentProps) {
   const [open, setOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_SHOW);
@@ -144,7 +146,10 @@ export function ClusterNodeComponent({
 
   // Cluster summary entry for this node
   const entry = summaryLookup?.[node.label];
-  const summaryTitle = entry?.title?.replace(/\*\*/g, "") ?? null;
+  const rewrite = displayFormat && displayFormat !== "full"
+    ? entry?.rewrites?.[displayFormat]
+    : null;
+  const summaryTitle = rewrite?.title ?? entry?.title?.replace(/\*\*/g, "") ?? null;
 
   // Preview text: use summary title, fall back to first non-empty feedback
   let preview = "";
@@ -222,7 +227,12 @@ export function ClusterNodeComponent({
       {/* Body */}
       {open && (
         <div className={isSubCluster ? "" : "border-t"}>
-          {entry?.summary && (
+          {rewrite ? (
+            <div className="px-4 pt-3 pb-2">
+              <p className="text-sm font-semibold mb-1">{rewrite.title}</p>
+              <p className="text-sm text-muted-foreground whitespace-pre-line">{rewrite.body}</p>
+            </div>
+          ) : entry?.summary ? (
             <div className="px-4 pt-3">
               <ExpandableText
                 text={entry.summary}
@@ -231,7 +241,7 @@ export function ClusterNodeComponent({
                 label="Cluster summary"
               />
             </div>
-          )}
+          ) : null}
           <ClusterDetailStats
             sortedCountries={stats.sortedCountries}
             sortedTypes={stats.sortedTypes}
@@ -256,6 +266,7 @@ export function ClusterNodeComponent({
                     isSubCluster
                     timeRange={timeRange}
                     summaryLookup={summaryLookup}
+                    displayFormat={displayFormat}
                   />
                 ))}
             </div>

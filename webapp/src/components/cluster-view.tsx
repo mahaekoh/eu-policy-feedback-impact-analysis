@@ -94,6 +94,7 @@ export function ClusterView({
   const [sort, setSort] = useState<ClusterSort>("size-desc");
   const [search, setSearch] = useState("");
   const [minSize, setMinSize] = useState(1);
+  const [displayFormat, setDisplayFormat] = useState<string>("full");
 
   // Build feedback lookup
   const feedbackLookup = useMemo(() => {
@@ -125,6 +126,19 @@ export function ClusterView({
   );
 
   const policySummary = clusterData.cluster_summaries?.policy_summary ?? null;
+
+  // Derive available rewrite formats from cluster summary entries
+  const availableFormats = useMemo(() => {
+    const formatSet = new Set<string>();
+    for (const entry of Object.values(summaryLookup)) {
+      if (entry.rewrites) {
+        for (const key of Object.keys(entry.rewrites)) {
+          formatSet.add(key);
+        }
+      }
+    }
+    return Array.from(formatSet).sort();
+  }, [summaryLookup]);
 
   // Build cluster tree
   const allClusters = useMemo(
@@ -268,6 +282,22 @@ export function ClusterView({
           </Select>
         )}
 
+        {availableFormats.length > 0 && (
+          <Select value={displayFormat} onValueChange={setDisplayFormat}>
+            <SelectTrigger className="w-full sm:w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="full">Full summary</SelectItem>
+              {availableFormats.map((f) => (
+                <SelectItem key={f} value={f}>
+                  {f.charAt(0).toUpperCase() + f.slice(1)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
         <Select
           value={sort}
           onValueChange={(v) => setSort(v as ClusterSort)}
@@ -329,6 +359,7 @@ export function ClusterView({
             node={cluster}
             timeRange={timeRange}
             summaryLookup={summaryLookup}
+            displayFormat={displayFormat}
           />
         ))}
       </div>
