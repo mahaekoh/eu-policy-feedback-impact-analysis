@@ -18,6 +18,7 @@ A data pipeline and web platform for exploring public consultation feedback in E
 - [Pipeline Orchestration](#pipeline-orchestration)
 - [Working with the Data](#working-with-the-data)
 - [Internal Parameters Reference](#internal-parameters-reference)
+- [Detailed Documentation](#detailed-documentation)
 
 ## Purpose
 
@@ -41,7 +42,8 @@ The pipeline processes the full "Have Your Say" archive:
 6. **Summarize** long documents and feedback attachments using AI, making the substance of hundreds of pages accessible at a glance
 7. **Compare** before- and after-feedback documents using AI-generated change summaries, highlighting how policy texts evolved after public consultation
 8. **Cluster** feedback by topic using sentence embeddings, revealing the thematic structure of public input on each initiative
-9. **Visualize** everything through an interactive web application with search, filtering, and drill-down exploration
+9. **Rewrite** cluster summaries into concise, accessible formats (e.g. Reddit-style) for quick consumption
+10. **Visualize** everything through an interactive web application with search, filtering, and drill-down exploration
 
 All 2,970 initiatives with feedback are processed, covering the full range of EU policy areas from 2016 to the present.
 
@@ -117,7 +119,7 @@ cp pipeline.conf.example pipeline.conf
 ./pipeline.sh remote summarize
 ./pipeline.sh pull summaries
 
-# Or run the entire 28-stage pipeline end-to-end
+# Or run the entire 30-stage pipeline end-to-end
 ./pipeline.sh full
 ```
 
@@ -137,7 +139,7 @@ Open [http://localhost:3000](http://localhost:3000) to browse initiatives, feedb
 
 ```
 .
-├── src/                           # Python pipeline scripts (24 scripts)
+├── src/                           # Python pipeline scripts (28 scripts, see src/README.md)
 │   ├── scrape_*.py                #   Scraping (2 scripts)
 │   ├── find_*.py                  #   Analysis / data quality (4 scripts)
 │   ├── ocr_*.py, merge_ocr_*.py  #   OCR pipeline (2 scripts)
@@ -148,6 +150,8 @@ Open [http://localhost:3000](http://localhost:3000) to browse initiatives, feedb
 │   ├── merge_*_summaries.py       #   Merge results back (2 scripts)
 │   ├── cluster_all_initiatives.py #   Sentence-embedding clustering
 │   ├── classify_*.py              #   LLM classification
+│   ├── rewrite_cluster_summaries.py  # Cluster summary rewrites (GPU)
+│   ├── merge_cluster_rewrites.py  #   Merge rewrites back
 │   ├── build_webapp_index.py      #   Pre-compute webapp data
 │   ├── text_utils.py              #   Shared text chunking/filtering
 │   ├── inference_utils.py         #   Shared vLLM batch inference helpers
@@ -160,10 +164,18 @@ Open [http://localhost:3000](http://localhost:3000) to browse initiatives, feedb
 ├── viewers/                       # Standalone HTML viewers (no dependencies)
 │   ├── viewer.html                #   Initiative JSON browser
 │   └── feedback-viewer.html       #   Clustered feedback browser
-├── pipeline.sh                    # Pipeline orchestration (28 stages)
+├── docs/                          # Detailed documentation
+│   ├── architecture.md            #   System architecture and design decisions
+│   ├── pipeline-reference.md      #   Complete 30-stage pipeline reference
+│   ├── data-dictionary.md         #   All data schemas and file formats
+│   └── deployment-guide.md        #   Setup, configuration, remote GPU
+├── viewers/                       # Standalone HTML viewers (no dependencies)
+│   ├── viewer.html                #   Initiative JSON browser
+│   └── feedback-viewer.html       #   Clustered feedback browser
+├── pipeline.sh                    # Pipeline orchestration (30 stages)
 ├── pipeline.conf.example          # Pipeline config template
 ├── pyproject.toml                 # Python project metadata
-├── CLAUDE.md                      # Full technical reference
+├── CLAUDE.md                      # Full technical reference (Claude Code)
 └── data/                          # All pipeline data (gitignored)
 ```
 
@@ -203,6 +215,8 @@ Each pipeline step reads from the previous step's output and writes its own. The
 | **Classify** | `classify_initiative_and_feedback.py` | `data/analysis/unit_summaries/` | `data/classification/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Batch-level**: per-batch files provide crash recovery. Model is not loaded if there is no work. | No — files are immutable once written. To regenerate, delete the output file. |
 | **Summarize clusters** | `summarize_clusters.py` | `data/clustering/{scheme}/` | `data/cluster_summaries/{scheme}/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Item-level**: reuses `cluster_feedback_summary` from `initiative_details` when available (Phase 1). **Cache-level**: content-addressed cache (`_cluster_cache.json`) keyed by SHA-256 of sorted feedback IDs skips clusters with unchanged membership (Phase 3). **Batch-level**: per-batch files in `_batches_p1/`, `_batches_p2/`, `_batches_p3/` provide crash recovery. | No — files are immutable once written. `_cluster_cache.json` is updated incrementally. |
 | **Merge cluster summaries** | `merge_cluster_feedback_summaries.py` | Cluster summaries + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None | In-place mutation: sets `cluster_feedback_summary` on each feedback item, `cluster_policy_summary` and `cluster_summaries` at initiative top level. |
+| **Rewrite clusters** | `rewrite_cluster_summaries.py` | `data/cluster_summaries/<scheme>/` + `data/analysis/unit_summaries/` | `data/cluster_rewrites/<format>/<scheme>/{id}.json` | **File-level**: skips initiatives whose output file already exists. **Batch-level**: per-batch files in `_batches/` provide crash recovery. Model is not loaded if there is no work. | No — files are immutable once written. To regenerate, delete the output file. |
+| **Merge cluster rewrites** | `merge_cluster_rewrites.py` | Cluster rewrites + `initiative_details/` | Updates `data/scrape/initiative_details/{id}.json` **in place** | None | In-place mutation: sets `cluster_summaries[label].rewrites[format] = {title, body}`. Additive across formats — multiple format merges accumulate in the `rewrites` dict. |
 | **Build webapp index** | `build_webapp_index.py` | `data/scrape/initiative_details/` | `data/webapp/initiative_index.json` | None — always regenerates | Yes |
 |  |  |  | `data/webapp/global_stats.json` |  | Yes |
 |  |  |  | `data/webapp/country_stats.json` |  | Yes |
@@ -230,6 +244,7 @@ The scraper (`scrape_eu_initiative_details.py`) uses a merge strategy when re-fe
 | `cluster_feedback_summary` | `merge_cluster_feedback_summaries.py` | Feedback items (when `feedback_text` unchanged) |
 | `change_summary`, `diff` | `merge_change_summaries.py` | Initiative top level |
 | `cluster_policy_summary`, `cluster_summaries` | `merge_cluster_feedback_summaries.py` | Initiative top level |
+| `cluster_summaries[].rewrites` | `merge_cluster_rewrites.py` | Initiative top level (additive per format) |
 
 This means running the full pipeline, re-scraping, then running it again does not require re-doing all LLM inference — only initiatives with genuinely changed source data need reprocessing.
 
@@ -247,6 +262,7 @@ When pulling results from remote, `pipeline.sh` uses different strategies depend
 | `clustering` | Overwrite | Files are overwritten every run (no `--skip-existing` in pipeline) |
 | `embeddings` | Overwrite | Files are overwritten when initiative data changes |
 | `cluster-summaries` | Skip existing | File-level resume makes output files immutable |
+| `cluster-rewrites` | Skip existing | File-level resume makes output files immutable |
 | `change-summaries` | Skip existing | File-level resume makes output files immutable |
 
 ### Output files overview
@@ -285,6 +301,9 @@ data/
 │   ├── _batches_p1/                      # Crash recovery (auto-cleaned)
 │   ├── _batches_p2/                      # Crash recovery (auto-cleaned)
 │   └── _batches_p3/                      # Crash recovery (auto-cleaned)
+├── cluster_rewrites/{format}/{scheme}/
+│   ├── {id}.json                         # Immutable (file-level resume)
+│   └── _batches/                         # Crash recovery (auto-cleaned)
 └── webapp/
     ├── initiative_index.json             # Overwritten by build_webapp_index
     ├── global_stats.json                 # Overwritten by build_webapp_index
@@ -380,7 +399,7 @@ The output files are standard JSON. You can explore them with:
 
 ## Running the Full Pipeline
 
-The pipeline has 28 stages that alternate between local processing and remote GPU computation. Here is the complete stage order:
+The pipeline has 30 stages that alternate between local processing and remote GPU computation. Here is the complete stage order:
 
 | # | Stage | Location | Description |
 |---|---|---|---|
@@ -399,8 +418,10 @@ The pipeline has 28 stages that alternate between local processing and remote GP
 | 21 | `build-index` | local | Pre-compute webapp index and statistics |
 | 22–24 | `push clustering` → `remote summarize-clusters` → `pull cluster-summaries` | remote GPU | Summarize clusters (120B LLM) |
 | 25 | `merge-cluster-feedback-summaries` | local | Merge cluster summaries back (per scheme) |
-| 26–27 | `remote summarize-changes` → `pull change-summaries` | remote GPU | Detect before/after changes (120B LLM) |
-| 28 | `merge-change-summaries` | local | Merge change summaries back |
+| 26 | `remote rewrite-clusters` | remote GPU | Rewrite cluster summaries into concise formats (120B LLM) |
+| 27 | `merge-cluster-rewrites` | local | Merge cluster rewrites back (per scheme, per format) |
+| 28–29 | `remote summarize-changes` → `pull change-summaries` | remote GPU | Detect before/after changes (120B LLM) |
+| 30 | `merge-change-summaries` | local | Merge change summaries back |
 
 All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (summarize, classify, summarize-clusters, summarize-changes) use file-level resume — they skip initiatives whose output already exists and don't load the model if there's no work. All LLM stages also write per-batch result files for crash recovery within a run. See [Resume and recovery patterns](#resume-and-recovery-patterns) for details.
 
@@ -423,7 +444,7 @@ All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (
 ```bash
 ./pipeline.sh setup                    # Install local Python deps (uv sync) + Hugging Face login
 ./pipeline.sh setup-remote             # Deploy code + install remote GPU deps (pip) + HF login
-./pipeline.sh list                     # Show all 28 stages
+./pipeline.sh list                     # Show all 30 stages
 ./pipeline.sh full                     # Run entire pipeline end-to-end
 ./pipeline.sh <stage>                  # Run a single stage
 ./pipeline.sh deploy                   # Sync src/ to remote
@@ -435,11 +456,11 @@ All LLM stages use `unsloth/gpt-oss-120b` via vLLM batch inference. LLM stages (
 ./pipeline.sh clean-batches <target>   # Delete batch recovery files on remote
 ```
 
-**Push targets:** `ocr`, `translation`, `analysis`, `unit-summaries`, `clustering`, `all`
+**Push targets:** `ocr`, `translation`, `analysis`, `unit-summaries`, `clustering`, `cluster-rewrites`, `all`
 
-**Pull targets:** `ocr`, `translation`, `summaries`, `classification`, `clustering`, `embeddings`, `cluster-summaries`, `change-summaries`, `logs`, `all`
+**Pull targets:** `ocr`, `translation`, `summaries`, `classification`, `clustering`, `embeddings`, `cluster-summaries`, `cluster-rewrites`, `change-summaries`, `logs`, `all`
 
-**Remote GPU steps:** `ocr`, `translate`, `summarize`, `classify`, `cluster`, `summarize-clusters`, `summarize-changes`
+**Remote GPU steps:** `ocr`, `translate`, `summarize`, `classify`, `cluster`, `summarize-clusters`, `rewrite-clusters`, `summarize-changes`
 
 ### Remote execution model
 
@@ -529,6 +550,13 @@ The pipeline uses many internal parameters that are not exposed as CLI arguments
 | `--batch-size` default | 8,192 | `summarize_clusters.py` | Prompts per vLLM inference batch |
 | `--min-noise-summarize-chars` | 1,000 | `summarize_clusters.py` | Minimum text length for noise feedback to get summarized |
 
+### Cluster rewriting
+
+| Parameter | Value | File | Description |
+|---|---|---|---|
+| `MAX_OUTPUT_TOKENS` | 4,096 | `rewrite_cluster_summaries.py` | Max output tokens per rewrite (rewrites are short) |
+| `--batch-size` default | 2,048 | `rewrite_cluster_summaries.py` | Prompts per vLLM inference batch |
+
 ### Classification
 
 | Parameter | Value | File | Description |
@@ -570,6 +598,23 @@ The pipeline uses many internal parameters that are not exposed as CLI arguments
 |---|---|---|---|
 | `PARALLEL_JOBS` | 4 | `pipeline.sh` | Number of parallel rsync streams for push/pull operations |
 
-## Technical Reference
+## Detailed Documentation
 
-For a complete technical breakdown of every pipeline script (all CLI arguments, defaults, input/output paths), utility libraries, webapp components, TypeScript interfaces, and data loading details, see [CLAUDE.md](CLAUDE.md).
+For deeper reference, see the [`docs/`](docs/) folder:
+
+| Document | Description |
+|---|---|
+| [Architecture](docs/architecture.md) | System architecture, data flow diagrams, and design decisions |
+| [Pipeline Reference](docs/pipeline-reference.md) | Complete 30-stage pipeline reference with all inputs, outputs, resume behavior, and internal parameters |
+| [Data Dictionary](docs/data-dictionary.md) | Full data schemas for every JSON file produced by the pipeline |
+| [Deployment Guide](docs/deployment-guide.md) | Setup, configuration, remote GPU provisioning, and troubleshooting |
+
+Additional references:
+
+| Document | Description |
+|---|---|
+| [Python Scripts](src/README.md) | All 28 Python scripts organized by pipeline stage |
+| [Standalone Viewers](viewers/README.md) | HTML viewers for browsing initiative and clustering JSON files |
+| [Webapp](webapp/README.md) | Next.js webapp documentation (pages, components, data loading, TypeScript types) |
+| [Authentication](webapp/AUTH.md) | Google OAuth setup for the webapp |
+| [CLAUDE.md](CLAUDE.md) | Full technical reference for Claude Code (every CLI argument, TypeScript interface, component) |

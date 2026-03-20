@@ -75,6 +75,10 @@ All data lives under `data/`. The pipeline is orchestrated by `pipeline.sh` (see
           |
           v
   summarize_clusters.py ------------> data/cluster_summaries/<scheme>/*.json
+          |
+          v
+  rewrite_cluster_summaries.py ----> data/cluster_rewrites/<format>/<scheme>/*.json
+                                      (concise rewrites in named formats, e.g. "reddit")
 ```
 
 ## Prerequisites
